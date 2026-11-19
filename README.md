@@ -10,7 +10,6 @@
 > 这不是"移植"。SAI 是闭源商业软件，没有源码可移植；这是**搬迁**——把它放进 Android 上的
 > 一个 Windows 兼容层，然后给它补一条它本来就支持的输入通道（WinTab）。
 
-![压感笔迹](docs/images/pressure-stroke.png)
 
 ## 它是怎么工作的
 
