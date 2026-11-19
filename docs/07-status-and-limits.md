@@ -65,7 +65,7 @@ WTPacket ... press=0    lat=1ms     ← 抬笔/悬停
 | `TouchpadView.onTouchEvent` ACTION_DOWN | 立即 `pressPointerButtonLeft` | 修"拖动画不出线" |
 | `releasePointerButtonLeft` | 30ms 延迟 → 0ms | 修"双击被吞成单击" |
 
-`onExternalMouseEvent` 里还按压力合成按下/抬起（阈值 0.03）：
+`onExternalMouseEvent` 里还按压力合成按下/抬起（**现在的规则是「有压力就落笔」**：`PRESS_STRONG = 0.0f`、`PRESS_MIN = 0.001f`）：
 数位板只给 `HOVER_MOVE`，不给 `DOWN`，所以必须用压力自己判断落笔。
 
 ## 内置桥（`PenBridge`，classes2.dex）
@@ -78,7 +78,11 @@ WTPacket ... press=0    lat=1ms     ← 抬笔/悬停
 
 ## 已知限制 / 后续可优化
 
-1. **压力阈值 0.03** 是经验值。若发现"轻触不落笔"或"悬停时误落笔"，调 `0x3cf5c28f` 这个常量。
+1. **触发阈值现在是「有压力就落笔」**（v0.1.1 起）。`PenBridge` 里两个常量：
+   `PRESS_STRONG = 0.0f`（按下判据，`pressure > 0`）、`PRESS_MIN = 0.001f`（抬起判据）；
+   另外 `syncDragOnly` 里 ACTION_DOWN 一有压力就按下，不再等 10px / 200ms。
+   如果哪天出现「悬停微压就误落笔」，把 `PRESS_STRONG` 调到 `0.005f` 左右即可；
+   改的就是 `android/PenBridge.java` 里那一行，重新构建见 `docs/04`。
 2. **坐标映射**：数位板整面 → 容器整面直接拉伸。板子是 16:10、容器 16:9，会有轻微纵向拉伸。
    要精确可加 letterbox（保持比例 + 居中）。
 3. **倾斜/橡皮**：`ABS_TILT_X/Y`、`BTN_TOOL_RUBBER` 在 evdev 里有，但 `MotionEvent` 侧目前没转发。
