@@ -46,8 +46,16 @@ git ls-files | wc -l          # 应该是 69 个文件
 git count-objects -vH | grep size-pack   # 打包后应在 1 MB 上下
 ```
 
-> 移动硬盘是 exFAT，不支持 Unix 权限位。在那种盘上 `git status` 会把所有文件报成 "modified"，
-> 一条 `git config core.filemode false` 就正常了（本仓库已经设好）。
+> **exFAT 上的两个坑**（本项目就在一块 exFAT 移动硬盘上整理，都踩过）：
+>
+> 1. exFAT 不支持 Unix 权限位，`git status` 会把所有文件报成 "modified" →
+>    `git config core.filemode false`。
+> 2. macOS 会在 exFAT 上给文件生成 `._xxx` 伴生文件（AppleDouble）。若它出现在
+>    `.git/objects/pack/` 里，`git gc` 会把 `._pack-*.idx` 当成真的索引读，然后报
+>    `non-monotonic index` 并中止。所以这台盘上的仓库设了 `git config gc.auto 0`
+>    （不自动打包，保持松散对象）。
+>
+> 想彻底避免：把仓库克隆到 APFS/HFS+ 盘再推送，移动硬盘只当资料存档。
 
 ## 2. 打 tag
 
