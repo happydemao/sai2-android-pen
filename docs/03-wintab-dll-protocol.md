@@ -1,5 +1,9 @@
 # 把 macOS 的压感桥接到安卓：补丁指南
 
+> **注意**：本文描述的是 **0.3.0 之前**的手动装配流程（往容器里拷 DLL、导注册表）。
+> 0.3.0 起这些都已内置在 APK，日常安装只看 [09-install-tutorial.md](./09-install-tutorial.md)。
+> 保留本文是为了讲清报文格式、DLL 行为与排查手段。
+
 配套文件：[`SaiPressureBridge.java`](../android/SaiPressureBridge.java)（安卓侧发送端）
 上游：[ametrien/Paint-Tool-SAI-pen-pressure-macOS-fix](https://github.com/ametrien/Paint-Tool-SAI-pen-pressure-macOS-fix)（GPL-3.0，见 [../NOTICE](../NOTICE)）
 

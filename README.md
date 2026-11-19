@@ -40,6 +40,7 @@ SAI 自己支持 Wintab 数位板协议，Wine 自带的那份是空实现。所
 ## 快速开始
 
 完整图文教程：[docs/09-install-tutorial.md](./docs/09-install-tutorial.md)。
+视频/图文版（作者录制）：[安卓终于可以用sai2力 · B站](https://www.bilibili.com/opus/1272346716743401491)。
 
 **从 0.3.0 起，除了 SAI 本体，其它东西都内置在 APK 里**（压感桥、`wt_pmax.txt`、注册表覆盖、
 Noto 中文字体）。所以要做的只有三步：
@@ -75,11 +76,10 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | [02-bridge-design.md](./docs/02-bridge-design.md) | 压感桥的整体设计：为什么只能搬一半、"假 macOS 助手"方案、取舍 |
 | [03-wintab-dll-protocol.md](./docs/03-wintab-dll-protocol.md) | **报文协议** + DLL 用法 + 四处 smali 改动 + 编译 + 验收顺序 |
 | [04-patching-winlator.md](./docs/04-patching-winlator.md) | 打补丁实录：为什么只用 `{p0,p1}`、笔点击的原理、坑与回滚 |
-| [05-container-checklist.md](./docs/05-container-checklist.md) | 设备到手后的分段检查单（从"Box64 能不能加载 DLL"开始逐段验） |
 | [06-device-test-log.md](./docs/06-device-test-log.md) | 真机实测全记录，含原始日志与逐项结论 |
 | [07-status-and-limits.md](./docs/07-status-and-limits.md) | 当前可用形态、已知限制、后续可优化项 |
 | [08-winlator-quickstart.md](./docs/08-winlator-quickstart.md) | 不追求压感时的最小可用配置与性能调优 |
-| [09-install-tutorial.md](./docs/09-install-tutorial.md) | **图文安装教程**（新手向，两种方式：纯触屏 / adb） |
+| [09-install-tutorial.md](./docs/09-install-tutorial.md) | **图文安装教程**（新手向，三步装完） |
 | [10-releasing.md](./docs/10-releasing.md) | 发布清单：Release 附件、LGPL 义务、不要提交什么 |
 
 ## 已验证的能力
