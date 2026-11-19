@@ -46,8 +46,11 @@ public final class PenBridge {
      *  - 压力层：兜底，笔若只靠压力表达接触（某些驱动），压力够大也算按下
      * 只用压力会被悬停抖动（0.09 上下）骗出误点击，所以动作优先。
      */
-    private static final float PRESS_MIN = 0.02f;
-    private static final float PRESS_STRONG = 0.35f;
+    /* 任意压力即落笔：0.0f 表示"只要有压力就触发"。
+     * 原来 PRESS_STRONG = 0.35f，接触压力 0.03 / 移动中 0.005 的笔永远够不到，
+     * 只能靠 ACTION_DOWN 兜底；悬停派发为主的笔会完全点不动。 */
+    private static final float PRESS_MIN = 0.001f;
+    private static final float PRESS_STRONG = 0.0f;
     /** 超过这么久没收到笔事件就认为笔已离开（BLE 可能不给 HOVER_EXIT）。 */
     private static final long LOST_MS = 700;
 
@@ -323,9 +326,26 @@ public final class PenBridge {
                     downSY = ev.getY();
                     downEventMs = ev.getEventTime();
                     dragPressed = false;
+                    /* 有压力就立刻按下，不等 10px / 200ms——否则每一笔起笔都被吃掉。
+                     * 压力为 0 的设备仍然走下面的 moved/slow 兜底。 */
+                    if (pressure > 0f) {
+                        dragPressed = true;
+                        mInjectPointerMove.invoke(xs, x, y);
+                        mInjectPress.invoke(xs, BUTTON_LEFT);
+                        note("DRAG_DOWN on-pressure " + x + "," + y + " pr=" + pressure);
+                        flog("DRAG_DOWN pr=" + pressure + " (pressure)");
+                    }
                     break;
 
                 case MotionEvent.ACTION_MOVE: {
+                    if (!dragPressed && pressure > 0f) {
+                        dragPressed = true;
+                        mInjectPointerMove.invoke(xs, x, y);
+                        mInjectPress.invoke(xs, BUTTON_LEFT);
+                        note("DRAG_DOWN on-pressure " + x + "," + y + " pr=" + pressure);
+                        flog("DRAG_DOWN pr=" + pressure + " (pressure)");
+                        break;
+                    }
                     if (!dragPressed) {
                         final float dx = ev.getX() - downSX;
                         final float dy = ev.getY() - downSY;
