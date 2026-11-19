@@ -443,28 +443,12 @@ B64_8
                     downSY = ev.getY();
                     downEventMs = ev.getEventTime();
                     dragPressed = false;
-                    /* 有压力就立刻按下，不等 10px / 200ms——否则每一笔起笔都被吃掉。
-                     * 压力为 0 的设备仍然走下面的 moved/slow 兜底。 */
-                    if (pressure > 0f) {
-                        dragPressed = true;
-                        mInjectPointerMove.invoke(xs, x, y);
-                        mInjectPress.invoke(xs, BUTTON_LEFT);
-                        note("DRAG_DOWN on-pressure " + x + "," + y + " pr=" + pressure);
-                        flog("DRAG_DOWN pr=" + pressure + " (pressure)");
-                        armReleaseWatchdog(pad);
-                    }
+                    /* 这里故意不按下：正规 STYLUS 的原生 isTap() 会在抬手时自己点一次
+                     * （<200ms 且 <10px）。我们在 DOWN 就先按，等于一次轻点变成两次点击。
+                     * 拖动/长按由下面的 moved / slow 判据接手，正好与 isTap() 互补。 */
                     break;
 
                 case MotionEvent.ACTION_MOVE: {
-                    if (!dragPressed && pressure > 0f) {
-                        dragPressed = true;
-                        mInjectPointerMove.invoke(xs, x, y);
-                        mInjectPress.invoke(xs, BUTTON_LEFT);
-                        note("DRAG_DOWN on-pressure " + x + "," + y + " pr=" + pressure);
-                        flog("DRAG_DOWN pr=" + pressure + " (pressure)");
-                        armReleaseWatchdog(pad);
-                        break;
-                    }
                     if (!dragPressed) {
                         final float dx = ev.getX() - downSX;
                         final float dy = ev.getY() - downSY;

@@ -92,8 +92,10 @@ WTPacket ... press=0    lat=1ms     ← 抬笔/悬停
 ## 已知限制 / 后续可优化
 
 1. **触发阈值现在是「有压力就落笔」**（v0.1.1 起）。`PenBridge` 里两个常量：
-   `PRESS_STRONG = 0.0f`（按下判据，`pressure > 0`）、`PRESS_MIN = 0.001f`（抬起判据）；
-   另外 `syncDragOnly` 里 ACTION_DOWN 一有压力就按下，不再等 10px / 200ms。
+   `PRESS_STRONG = 0.0f`（按下判据，`pressure > 0`）、`PRESS_MIN = 0.001f`（抬起判据）。
+   **注意**：这只作用于"鼠标型笔"（`syncLeftButton`）。正规 STYLUS（S Pen 之类，走 `syncDragOnly`）
+   仍然必须等 10px / 200ms 才按下——因为它的原生 `isTap()` 会在抬手时自己点一次，
+   我们在 DOWN 就先按会导致**一次轻点变两次点击**（0.3.1 修回过这个问题）。
    如果哪天出现「悬停微压就误落笔」，把 `PRESS_STRONG` 调到 `0.005f` 左右即可；
    改的就是 `android/PenBridge.java` 里那一行，重新构建见 `docs/04`。
 2. **坐标映射**：数位板整面 → 容器整面直接拉伸。板子是 16:10、容器 16:9，会有轻微纵向拉伸。
