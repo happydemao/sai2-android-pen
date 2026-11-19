@@ -76,6 +76,19 @@ WTPacket ... press=0    lat=1ms     ← 抬笔/悬停
 - 所有异常吞掉并降级为"没有压感"，绝不让 Winlator 崩
 - 只依赖 APK 本来就有的 `INTERNET` 权限
 
+## APK 0.3.0：全集成（除 SAI 外零手工）
+
+| 内容 | 集成方式 | 新建容器后 |
+|---|---|---|
+| `wintab32.dll`（185,607 B） | App 内置 base64，`PenBridge.configure()` 时自愈写入 | ✅ 自动 |
+| `wt_pmax.txt` | 容器模板 `assets/container_pattern.tzst` | ✅ 自动 |
+| `DllOverrides` / `WT_DEBUG` | 同上（模板 `user.reg`） | ✅ 自动 |
+| 字体 + `Fonts\Replacements` | 同上（模板内 `Fonts/NotoSansCJK-Regular.ttc`） | ✅ 自动 |
+| **SAI 本体** | **不集成**（商业软件，需用户自备授权） | 需自己装 |
+
+> 为什么 DLL 不能只靠模板：Wine 的 `wineboot` 在容器首次启动时会把 builtin DLL
+> 拷进 `system32`，覆盖模板里预置的那份。详见 [04](./04-patching-winlator.md) 第七节。
+
 ## 已知限制 / 后续可优化
 
 1. **触发阈值现在是「有压力就落笔」**（v0.1.1 起）。`PenBridge` 里两个常量：

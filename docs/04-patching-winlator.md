@@ -163,10 +163,18 @@ adb shell su -c "grep -c SYNTH /data/data/com.winlator/files/pb.log"   # 应恒�
 > 这三样都在容器内部，不跟 App 走。缺了 reg 覆盖时 Wine 会加载内置空实现，
 > SAI 直接报「**WinTab 驱动返回了错误**」（2026-11-18 12:45 在 xuser-2 上复现并修复）。
 >
-> **2026-11-18 13:00 起已从根上解决**：`assets/container_pattern.tzst`（新容器的模板）
-> 已被改造，预置了 `wintab32.dll`、`wt_pmax.txt` 和 `DllOverrides`/`WT_DEBUG` 注册表项。
-> 因此**以后新建的容器天生带压感桥**；已存在的容器仍需手动补。
-> 模板改造产物：`.stage\container_pattern_patched.tzst`，`build-apk.ps1` 会自动替换进 APK。
+> **2026-11-19 22:30 修正**：模板方案只能带一半。实测（新建 xuser-3）：
+> `wt_pmax.txt`、字体、`DllOverrides`/`WT_DEBUG`/`Fonts\Replacements` 注册表项**都活下来了**，
+> 但 `system32\wintab32.dll` 会被 **Wine 的 wineboot 覆盖回自带那份**（69,632 字节）——
+> 前缀创建时 Wine 会把 builtin DLL 拷进 `system32`，模板里预置的原生 DLL 必被替换。
+>
+> 现在的做法（APK 0.3.0 起）：
+> 1. `assets/container_pattern.tzst` 预置字体、`wt_pmax.txt`、注册表项（这部分有效）；
+> 2. `PenBridge` 里内置 DLL 的 base64（247 KB，分 9 段绕开 dex 单字符串 64 KB 上限），
+>    在 `configure()`（容器界面起来、SAI 启动之前）检查 `system32\wintab32.dll` 大小，
+>    不是 185,607 字节就重写一份。实测新容器启动 15 秒内即被补回。
+>
+> 结论：**模板 + 运行时自愈**两层，才能做到"新建容器天生可用"。
 
 ### 注册表"导入成功却没生效"的坑（重要）
 

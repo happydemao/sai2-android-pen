@@ -41,16 +41,19 @@ SAI 自己支持 Wintab 数位板协议，Wine 自带的那份是空实现。所
 
 完整图文教程：[docs/09-install-tutorial.md](./docs/09-install-tutorial.md)。
 
+**从 0.3.0 起，除了 SAI 本体，其它东西都内置在 APK 里**（压感桥、`wt_pmax.txt`、注册表覆盖、
+Noto 中文字体）。所以要做的只有三步：
+
 1. **装补丁版 Winlator**（[Releases](/releases) 里的 `Winlator-11.2-SAIPen.apk`）。
-   它基于原版 APK 逐字节复制，只替换了 `classes.dex`、新增 `classes2.dex`。
    > ⚠️ 包名仍是 `com.winlator`，签名不同：装之前必须卸载官方版，**容器和里面的东西会没**。
-2. **建容器**，装中文字体（否则 SAI 全是方块），关掉 *Capture pointer on external mouse*，
-   环境变量先照 `box64.env.example` 里标 ★ 的四条加。
-3. **放入你自己的 SAI**（本项目不提供，见[法律边界](#法律与许可)），完整目录，保留 `init/`。
-4. **放压感桥的 3 个文件**进容器：`dist/wintab32.dll` → `C:\windows\system32\`、
-   `dist/wt_pmax.txt` → `C:\`、导入 `dist/1-压感覆盖.reg`。
-5. **SAI 里打开 WinTab**：*Other → Options → Pen Tablet → Use WinTab API* → 重启 SAI。
-6. 验收：`C:\wt_status.txt` 里 `open=1`，落笔画线粗细随力度变化。
+2. **建容器**：分辨率按屏幕填，DPI 调大些，并**取消勾选 `Capture pointer on external mouse`**。
+3. **放入你自己的 SAI**（本项目不提供，见[法律边界](#法律与许可)），完整目录、保留 `init/`，
+   双击 `sai2.exe` 即可。
+
+验收：`C:\wt_status.txt` 里 `open=1`，落笔画线粗细随力度变化。
+
+> 用旧版 APK、或要给**升级前就存在**的容器补桥，见教程的
+> [附录 A](./docs/09-install-tutorial.md#附录-a旧版-apk--已有容器手动补桥)（手动放 DLL + 导入两个 `.reg`）。
 
 ## 仓库结构
 
