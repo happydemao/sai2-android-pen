@@ -49,6 +49,12 @@ public final class PenBridge {
     /* 任意压力即落笔：0.0f 表示"只要有压力就触发"。
      * 原来 PRESS_STRONG = 0.35f，接触压力 0.03 / 移动中 0.005 的笔永远够不到，
      * 只能靠 ACTION_DOWN 兜底；悬停派发为主的笔会完全点不动。 */
+    /* 发送上限：约 166 Hz。手写笔硬件常报 200~250 Hz，而 SAI 在 box64 下
+     * 每个样本都要重绘一小段；把中间点丢掉（只发最新位置）能显著降低负载，
+     * 线条形状由 SAI 自己插值，肉眼几乎无差别。 */
+    private static final long MIN_SEND_MS = 6;
+    private static long lastSendMs;
+
     private static final float PRESS_MIN = 0.001f;
     private static final float PRESS_STRONG = 0.0f;
     /** 超过这么久没收到笔事件就认为笔已离开（BLE 可能不给 HOVER_EXIT）。 */
@@ -616,7 +622,24 @@ B64_8
                 x = pendingX; y = pendingY; p = pendingP;
                 hasPending = false;
             }
+            long now = SystemClock.uptimeMillis();
+            long wait = MIN_SEND_MS - (now - lastSendMs);
+            if (wait > 0) {
+                try {
+                    Thread.sleep(wait);
+                } catch (InterruptedException ie) {
+                    return;
+                }
+                // 睡眠期间的新样本覆盖了 pending：直接发最新的那个，中间的丢掉
+                synchronized (LOCK) {
+                    if (hasPending) {
+                        x = pendingX; y = pendingY; p = pendingP;
+                        hasPending = false;
+                    }
+                }
+            }
             send(x, y, p);
+            lastSendMs = SystemClock.uptimeMillis();
         }
     }
 
