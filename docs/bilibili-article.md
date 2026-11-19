@@ -237,4 +237,17 @@ lang = en    ; 英文
 
 > 旧版 APK 新建容器后，Wine 会把 `system32\wintab32.dll` 覆盖回自带的那份（69,632 字节），所以每次新建容器都要重新放一次。新版 APK 会自动补回。
 
+### Q10：画超长线时 CPU 占满、容器卡死
+
+**不是压感桥的问题，是第三方破解/整合版自带的保护壳。**
+
+以 PivInk 那版为例，`PivInk.dll` 会挂起并改写其他线程（`SuspendThread` / `SetThreadContext` 等），
+在 box64 下多线程会互相等待、自旋成死循环——表现就是 SAI 七个线程各 100%、系统狂用 swap、
+触控完全没反应，只能强杀容器。
+
+**解决：换成 SYSTEMAX 官方的 SAI Ver.2（64 位 ZIP）。** 官方版画同样的长线完全正常，
+只是没授权时不能保存（作画、撤销都没问题）。本项目只支持官方版。
+
+---
+
 GitHub 仓库：https://github.com/happydemao/sai2-android-pen
