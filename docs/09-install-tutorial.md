@@ -64,7 +64,7 @@
 | `wt_pmax.txt` | 压力上限（内容一行 `4095`） | 同上 |
 | `1-压感覆盖.reg` | 让 Wine 优先加载我们的 `wintab32.dll` | 同上 |
 | `2-中文字体.reg` | 让 Wine 用中文字体替换 Tahoma 等 | 同上 |
-| `NotoSansCJK-Regular.ttc` | 中文字体，解决方块字 | **自己下载**，见第 3 步 |
+| `NotoSansCJK-Regular.ttc` | 中文字体，解决方块字 | **已随包提供**；缺失时见第 3 步自行下载 |
 | PaintTool SAI Ver.2 64bit ZIP | SAI 本体 | **自己购买下载**，见 1.1 |
 
 **平板的 Download 文件夹在容器里就是 `D:\`**，后面所有"从 D 盘复制"都指这里。
@@ -115,15 +115,20 @@
 > 这一步很多人会跳过，结果装 SAI 时满屏 `□□□`，连安装按钮都认不出来。
 > **先装字体，后面全程中文可读。**
 
-### 3.1 下载字体
+### 3.1 字体文件
 
-用 **Noto Sans CJK**（开源，SIL OFL 授权，可自由分发）：
+**字体已经在你下载的包里了**，不用另外找：
+
+```
+Download/aaa教程用（网盘内有相同内容）/NotoSansCJK-Regular.ttc      约 30 MB
+Download/aaa教程用（网盘内有相同内容）/NotoSansCJK-LICENSE-OFL.txt  它的许可
+```
+
+用的是 **Noto Sans CJK**，开源（SIL OFL 1.1），可以自由分发。包里没有它的话，
+从这几个地方拿，文件名要一致：
 
 - 仓库：<https://github.com/notofonts/noto-cjk>
-- 直接下载（Sans → OTC 里的合集文件）：<https://github.com/notofonts/noto-cjk/tree/main/Sans/OTC>
-- 要的文件名是 **`NotoSansCJK-Regular.ttc`**（约 30 MB，一个文件涵盖中日韩全部字重）
-
-下载后和前面那些文件一起放进 `Download/aaa教程用/`。
+- 直链（Sans → OTC 合集）：<https://github.com/notofonts/noto-cjk/tree/main/Sans/OTC>
 
 > 想用别的中文字体也行，但**字体族名要和 `2-中文字体.reg` 里写的一致**，
 > 见 3.3 末尾的说明。用 Noto 最省事，和默认配置完全对得上。
