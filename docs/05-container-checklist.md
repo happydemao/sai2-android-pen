@@ -79,7 +79,7 @@ adb shell su -c "find /data/data/com.winlator -name system32 -maxdepth 8 -type d
 2. 容器环境变量：`WINEDLLOVERRIDES=wintab32=n,b`
 3. `drive_c/wt_pmax.txt` → `4095`（**DLL 只在加载时读一次**，改完要重启容器）
 4. `WT_DEBUG=1`（先开着，通了再关）
-5. 启动 SAI → **选项 → 数位板 → Use WinTab API** → 重启 SAI
+5. 启动 SAI（默认即走 WinTab；没压感时再查 **选项 → 数位板** 的 API 选项）
 
 看状态文件：
 

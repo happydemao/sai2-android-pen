@@ -93,7 +93,7 @@
 | **发送端 → 报文的端到端正确性** | `tools/verify_bridge.py`（javac 现编真实 Java 类 + `wintab_reference.py` 逐行转写 DLL 逻辑） | ✅ **30/30**：四角+中心+24 点圆，解析、**y 向上**、比例映射、压力缩放、控制行隔离全部通过 |
 | 状态文件能判读故障态 | `tools/read_status.py` 对三种模拟状态 | ✅ 分别给出 `open=0` / `recv=0` / 正常 的结论与退出码 |
 | DLL 是纯 Win64、不依赖 macOS | 读 `wintab32.c` 的 include/API | ✅ 只用 `winsock2/windows.h`、临界区、消息钩子 |
-| 与 SAI 的对接方式 | 读 `WTInfoW/WTOpenW/WTPacket` 实现 | ✅ 只用 WinTab 子集，SAI 开 "Use WinTab API" 即走此分支 |
+| 与 SAI 的对接方式 | 读 `WTInfoW/WTOpenW/WTPacket` 实现 | ✅ 只用 WinTab 子集，SAI 默认就走这个分支 |
 
 > `verify_bridge.py` 里那个"30/30"不是自我安慰：它第一次跑出来是 **24 个 FAIL**，
 > 追下去发现是 Java 的 `float 0.7f × 4095 = 2867` 与 Python `round(0.7 × 4095) = 2866`
@@ -127,7 +127,7 @@ MotionEvent(pressure) → TouchpadView 补丁 → SaiPressureBridge.java
 - 改 `winlator-app` 的 `app/src/main/java/com/winlator/widget/TouchpadView.java`（**不是** 954 B 的 `XServerView.java`）
 - 用 `XForm.transformPoint()` 把笔坐标换到容器像素；用 `event.getHistorical*()` 取回被合并的样本（否则快笔变折线）
 - 容器环境变量 `WINEDLLOVERRIDES=wintab32=n,b`；DLL 放 `drive_c/windows/system32/`
-- SAI 里开 **Use WinTab API**，否则 DLL 装了也不用
+- SAI 默认走 WinTab，DLL 装上就能用；没压感时再查 **Other → Options → Pen Tablet** 的 API 选项
 - 验收看容器里的 `drive_c/wt_status.txt`：`open=1 → recv↑ → posted↑ → fetched↑`
 
 ### 路线 P2：不动 Winlator，用外接数位板喂压力（无补丁，但形态怪）

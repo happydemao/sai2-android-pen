@@ -199,7 +199,7 @@ xuser-2：[Software\\Wine\\DllOverrides] 1758569987   ← 模板原值，导入�
   - `SAI Ver.2/`（完整安装，含 `init/`、`sai2.ini`）
 - 注册表 `.wine/user.reg`：`[Software\\Wine\\DllOverrides] "wintab32"="native,builtin"`；`[Environment] "WT_DEBUG"="1"`
 - **Winlator 设置必须取消勾选 `Capture pointer on external mouse`**
-- **SAI 必须选 `Other → Options → Pen Tablet → Use WinTab API`** 并重启 SAI
+- SAI 默认走 WinTab；没压感时再查 `Other → Options → Pen Tablet` 的 API 选项
 - 校验：`drive_c/wt_status.txt` 出现 `open=1`、`recv/posted/fetched` 增长
 
 启动容器做自动化测试时用（免去点屏幕，`input tap` 在这台机器上被系统拦了）：

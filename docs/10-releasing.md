@@ -106,7 +106,7 @@ PaintTool SAI Ver.2 并拿到真实笔压。**不含 SAI 本体**，你需要自
 
 - SAI 每会话第一笔可能弹 `FileError(161)`，非致命。
 - 倾斜、橡皮未转发。
-- 首次安装需在 SAI 里打开 *Other → Options → Pen Tablet → Use WinTab API* 并重启 SAI。
+- SAI 默认走 WinTab；没压感时再查 *Other → Options → Pen Tablet* 的 API 选项。
 
 ## 许可
 

@@ -62,14 +62,14 @@ python ..\tools\sai_pen_test.py --circle --pmax 4095
    `n,b` 即 `native,builtin`：优先用我们的文件，找不到再退回 Wine 自带。
 3. 写 `.../drive_c/wt_pmax.txt`，内容 `4095`（一行数字）。**DLL 只在 DLL_PROCESS_ATTACH 读一次**，
    之后改无效；它决定了 SAI 看到的压力轴上限。
-4. 启动 SAI，打开 **选项 → 数位板 → Use WinTab API**（SAI 的 WinTab 分支不打开，DLL 白装）。
+4. 启动 SAI。SAI 默认就走 WinTab；装完没压感时，再去 **选项 → 数位板** 确认 API 选项（默认即 WinTab）。
 5. 此时应该**仍然没有压感**（没人在发包），但 SAI 的笔不动也不该崩；DLL 会在
    `drive_c/wt_status.txt` 写心跳。看到这个文件 = DLL 已在 SAI 里加载成功。
    ```bash
    # 容器里/安卓上随时可看：
    cat .../drive_c/wt_status.txt     # v=1 build=... open=1 recv=0 posted=0 fetched=0 pmax=4095
    ```
-   `open=1` 说明 SAI 真的打开了 WinTab 上下文（即 "Use WinTab API" 生效了）。
+   `open=1` 说明 SAI 已经打开了 WinTab 上下文。
    `recv=0` 说明还差第 3 步。
 
 ---
