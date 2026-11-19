@@ -7,7 +7,7 @@
 | `wintab32.dll` | `C:\windows\system32\wintab32.dll` | 压感桥本体。SAI 通过它拿到笔压；它自己从 UDP `47800` 收样本 |
 | `wt_pmax.txt` | `C:\wt_pmax.txt` | 压力上限（内容一行 `4095`）。**不复制也能画**，但会退回内置默认 1023，压力轴只剩 1/4 |
 | `1-压感覆盖.reg` | 双击导入（容器内 regedit） | `wintab32=native,builtin` + `WT_DEBUG=1`，让 Wine 优先加载我们的 DLL |
-| `2-中文字体.reg` | 双击导入（容器内 regedit） | 把 Tahoma 等替换成 Noto Sans CJK SC，修方块字 |
+| `2-中文字体.reg` | 双击导入（容器内 regedit） | 把 Tahoma 等替换成中文字体，修方块字。**默认写的是 `MiSans`**——用别的字体就先把文件里的族名改成对应值（如 `Noto Sans CJK SC`）再导入 |
 | `wtprobe.exe` | 任意目录，**和 `wintab32.dll` 同目录** | 桌面端探针：不碰 SAI 就能验"报文 → DLL"通不通 |
 
 ## 先在不碰 SAI 的情况下验通（10 分钟）

@@ -17,6 +17,12 @@ build-log*.txt
 __pycache__/
 *.pyc
 
+# ---- 网盘分享包（整包分发用，含字体，不进 git）----
+aaa教程用*/
+教程用*.zip
+*.ttf
+*.ttc
+
 # ---- 签名材料（泄露 = 别人可冒充你发布）----
 *.keystore
 *.jks

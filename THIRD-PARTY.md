@@ -37,7 +37,8 @@ Release 附件分发时，仍需满足各自的许可**：
 | 内容 | 许可 | 处理方式 |
 |---|---|---|
 | **PaintTool SAI Ver.2** | 商业软件（SYSTEMAX） | **绝不入库**。用户自带合法副本；保存功能需自行购买授权 |
-| NotoSansCJK 字体（`NotoSansCJK-Regular.ttc`） | SIL OFL-1.1 | 不入库，从 [Google Fonts](https://github.com/notofonts/noto-cjk) 自行下载 |
+| MiSans 字体（教程默认示例） | 小米 MiSans 许可：免费商用，但**禁止再分发字体文件** | **不入库、不随 Release / 网盘包分发**。用户自行从 <https://hyperos.mi.com/font> 下载 |
+| Noto Sans CJK 等其他中文字体 | SIL OFL-1.1 | 可选替代，自行下载；用它就要改 `dist/2-中文字体.reg` 里的族名 |
 | 第三方重打包的 SAI 安装器 | 授权不明 / 可能侵权 | **不入库、不链接、不在文档中引用** |
 
 ## 4. 商标
