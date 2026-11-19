@@ -1,0 +1,15 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.reg binary
+*.md text
+*.c text
+*.h text
+*.java text
+*.py text
+*.sh text eol=lf
+
+*.dll binary
+*.exe binary
+*.apk binary
+*.ttc binary
+*.png binary

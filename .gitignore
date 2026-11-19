@@ -1,0 +1,30 @@
+# ---- 构建环境（本地专用，绝不入库）----
+.stage/
+android-sdk/
+tools-jdk/
+.gradle-home/
+.android-home/
+.build/
+winlator-build/
+build-log*.txt
+*.log
+
+# ---- 构建产物 ----
+*.apk
+*.apk.idsig
+*.dex
+*.class
+__pycache__/
+*.pyc
+
+# ---- 签名材料（泄露 = 别人可冒充你发布）----
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# ---- 系统垃圾 ----
+.DS_Store
+._*
+Thumbs.db
