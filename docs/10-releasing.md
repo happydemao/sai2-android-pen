@@ -31,6 +31,24 @@ git ls-files | grep -Ei 'keystore|\.jks|\.p12|\.apk$|crack|keygen'
 grep -rn "/Users/\|C:\\\\Users\\\\" --include=*.md . || echo clean
 ```
 
+## 1.5 首次推送到 GitHub
+
+```bash
+# 在 GitHub 建空仓库（不要勾 README / .gitignore / LICENSE，本地都有了）
+git remote add origin git@github.com:<你的账号>/sai2-android.git
+git push -u origin main
+```
+
+推送前最后确认一次：
+
+```bash
+git ls-files | wc -l          # 应该是 69 个文件
+git count-objects -vH | grep size-pack   # 打包后应在 1 MB 上下
+```
+
+> 移动硬盘是 exFAT，不支持 Unix 权限位。在那种盘上 `git status` 会把所有文件报成 "modified"，
+> 一条 `git config core.filemode false` 就正常了（本仓库已经设好）。
+
 ## 2. 打 tag
 
 ```bash
