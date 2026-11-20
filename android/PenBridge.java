@@ -91,7 +91,12 @@ public final class PenBridge {
     /** 我们合成出来的左键是否处于按下状态。 */
     private static boolean penDown;
     /* 手指按下期间（按下由 Winlator 原生补丁处理，我们只负责兜底松手） */
+    private static java.lang.reflect.Field fPointer;
+    private static java.lang.reflect.Method mIsPressed;
     private static boolean fingerActive;
+    /* 落笔/抬笔样本单独排队：绝不合并，保证 SAI 一定收到 UP 和下一笔的 DOWN。
+     * 抬笔时还会追加两个位置不同的零压样本，见 emit()。 */
+    private static final java.util.ArrayDeque<int[]> CRIT = new java.util.ArrayDeque<>();
     private static long lastPenEventMs;
     /** 只在第一次见到笔时打一条诊断日志（设备源类型）。 */
     private static boolean loggedPen;
@@ -211,6 +216,15 @@ B64_8
             if (xy == null) return;
             final int x = xy[0], y = xy[1];
 
+            // 诊断：只对 DOWN 记录一次原始/变换后坐标，确认为什么画笔会贴边
+            if (action == MotionEvent.ACTION_DOWN) {
+                flog("MAP view=" + (int) ev.getX() + "," + (int) ev.getY()
+                        + " raw=" + (int) ev.getRawX() + "," + (int) ev.getRawY()
+                        + " viewSize=" + pad.getWidth() + "x" + pad.getHeight()
+                        + " screen=" + screenW + "x" + screenH
+                        + " -> " + x + "," + y);
+            }
+
             // 1) 压感采样（手指与笔都送）
             emit(x, y, pressure, action);
 
@@ -229,10 +243,10 @@ B64_8
                     syncDragOnly(pad, x, y, pressure, ev, action);
                 }
             } else {
-                // 手指：按下由 Winlator 原生补丁在 onTouchEvent 里做，我们不掺和；
-                // 但原生的"松手"是靠 postDelayed 排队的，快速连续两笔时上一次的松开
-                // 可能被下一次按下顶掉，表现为**连笔**。这里在 UP/CANCEL 同步补一次松开，
-                // 并且按下后挂一个静默看门狗，防止 UP 丢失时左键一直按着。
+                // 手指：Winlator 原生 onTouchEvent 只移动光标，从不按左键（它仅在抬手且
+                // 判定为 tap 时补一次 press+release）。手指笔画完全靠上面的 WinTab 流绘制，
+                // 收笔靠抬笔后补的悬停样本（见 emit()）。这里只在 UP 同步补一次 release，
+                // 防止系统里残留的按下状态把下一笔接上来。
                 if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
                     fingerActive = true;
                     lastPenEventMs = SystemClock.uptimeMillis();
@@ -311,6 +325,8 @@ B64_8
         try {
             float[] xform = (float[]) fXform.get(pad);
             if (xform == null) return null;
+            // 和 Winlator 原生一样用 view 坐标：xform 是按 view 尺寸建的，
+            // 用 getRawX() 在窗口不贴屏幕左上角（分屏、系统栏）时会整体偏移。
             float[] p = (float[]) mTransformPoint.invoke(null,
                     xform, ev.getX(), ev.getY());
             if (p == null || p.length < 2) return null;
@@ -447,7 +463,23 @@ B64_8
             Object xs = fXServer.get(pad);
             if (xs == null) return;
             mInjectRelease.invoke(xs, BUTTON_LEFT);
-            flog("RELEASE " + why);
+            // 自检：松手后立刻读一次指针的按键状态，确认真的松开了
+            try {
+                if (fPointer == null) {
+                    fPointer = xs.getClass().getField("pointer");
+                    Object ptr = fPointer.get(xs);
+                    if (ptr != null) {
+                        mIsPressed = ptr.getClass().getMethod("isButtonPressed",
+                                Class.forName("com.winlator.xserver.Pointer$Button"));
+                    }
+                }
+                Object ptr = fPointer != null ? fPointer.get(xs) : null;
+                boolean down = ptr != null && mIsPressed != null
+                        && Boolean.TRUE.equals(mIsPressed.invoke(ptr, BUTTON_LEFT));
+                flog("RELEASE " + why + " stillPressed=" + down);
+            } catch (Throwable ignored2) {
+                flog("RELEASE " + why);
+            }
         } catch (Throwable ignored) { }
     }
 
@@ -579,10 +611,34 @@ B64_8
             final boolean lifting = (action == 1 || action == 3 || action == 6 || action == 10);
             final boolean pressing = (action == 0 || action == 5);
 
-            int p;
             if (lifting) {
-                p = 0;
-            } else {
+                // 抬笔：先发 p=0 的抬笔样本，再补两个"悬停"样本（压力 0、位置各挪 1~2 px）。
+                //
+                // 这是"两笔首尾相连"的真正原因（真机实测）：SAI 的 WinTab 笔画不会因为
+                // 一个和最后一个点位置相同的零压包而结束。真实数位板抬笔后笔还在感应区里
+                // 悬停，驱动会继续送**位置在变**的零压样本，SAI 收到这些样本才收笔。
+                // 手指没有悬停事件，上一笔就一直敞着；下一笔的第一包从上一笔的终点连过去，
+                // 看起来就是两笔被一条直线接上了。位置必须不同：实测同一位置补一个零压包
+                // 不够，挪 1 px 就够。
+                //
+                // 同时把待发的移动样本丢掉：它可能比抬笔样本还早，却会排在 CRIT 之后发出，
+                // 变成"抬笔之后又来一个 p>0"，等于重新落笔。
+                synchronized (LOCK) {
+                    hasPending = false;
+                    if (CRIT.size() > 28) CRIT.clear();
+                    // 靠右边缘时往外挪会被 send() 夹到同一个像素，往回挪
+                    final int dx = (x + 2 < screenW) ? 1 : -1;
+                    CRIT.add(new int[]{x, y, 0});
+                    CRIT.add(new int[]{x + dx, y, 0});
+                    CRIT.add(new int[]{x + 2 * dx, y, 0});
+                    LOCK.notifyAll();
+                    ensureWorker();
+                }
+                return;
+            }
+
+            int p;
+            {
                 float pr = pressure;
                 if (pr < 0f) pr = 0f;
                 if (pr > 1f) pr = 1f;
@@ -592,6 +648,13 @@ B64_8
             }
 
             synchronized (LOCK) {
+                if (pressing) {
+                    // 落笔样本排队，不合并；队列有上限防止极端情况爆内存
+                    if (CRIT.size() < 32) CRIT.add(new int[]{x, y, p});
+                    LOCK.notifyAll();
+                    ensureWorker();
+                    return;
+                }
                 pendingX = x;
                 pendingY = y;
                 pendingP = p;
@@ -639,28 +702,38 @@ B64_8
 
         while (!disabled) {
             int x, y, p;
+            boolean critical = false;
             synchronized (LOCK) {
-                if (!hasPending) {
+                if (CRIT.isEmpty() && !hasPending) {
                     try {
                         LOCK.wait(200);
                     } catch (InterruptedException e) {
                         return;
                     }
                 }
-                if (!hasPending) continue;
-                x = pendingX; y = pendingY; p = pendingP;
-                hasPending = false;
+                int[] c = CRIT.poll();
+                if (c != null) {
+                    x = c[0]; y = c[1]; p = c[2];
+                    critical = true;
+                } else if (hasPending) {
+                    x = pendingX; y = pendingY; p = pendingP;
+                    hasPending = false;
+                } else {
+                    continue;
+                }
             }
+
+            // 落笔/抬笔立刻发；普通移动才受限速约束
             long now = SystemClock.uptimeMillis();
-            long wait = MIN_SEND_MS - (now - lastSendMs);
+            long wait = critical ? 0 : (MIN_SEND_MS - (now - lastSendMs));
             if (wait > 0) {
                 try {
                     Thread.sleep(wait);
                 } catch (InterruptedException ie) {
                     return;
                 }
-                // 睡眠期间的新样本覆盖了 pending：直接发最新的那个，中间的丢掉
                 synchronized (LOCK) {
+                    // 睡眠期间的新移动样本覆盖之；critical 在队列里，下一轮立刻发
                     if (hasPending) {
                         x = pendingX; y = pendingY; p = pendingP;
                         hasPending = false;
