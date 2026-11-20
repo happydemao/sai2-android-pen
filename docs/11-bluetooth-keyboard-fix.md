@@ -9,6 +9,9 @@
 `com.winlator.inputcontrols.ExternalController.isGameController()` 把**复合 BLE 键盘误判成手柄**，
 于是 `xserver.Keyboard.onKeyEvent()` 在读到键码之前就 `return false`，按键被整体丢弃。
 
+> 0.3.0 → 0.3.3 的 `classes.dex` 字节完全相同，所以同一份补丁可以直接打进 0.3.3。
+> 已生成并安装 `Winlator-11.2-SAIPen-0.3.3-keyboard.apk`（保留原签名、`adb install -r` 不丢容器）。
+
 ```
 Android KeyEvent (device 29, MCHOSE G75 V2 5.0 Keyboard)
         │
