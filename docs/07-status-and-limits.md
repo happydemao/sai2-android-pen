@@ -20,6 +20,11 @@
 > 误判成"鼠标型笔"，在原生已经点击的基础上又合成一次。改成只认 `0x2000` 位后修复。
 > 该设备 `logcat` 完全不可用，排错改看 `/data/data/com.winlator/files/pb.log`。
 
+> **2026-11-20 22:10（光标跟随）**
+> S Pen 悬停时 SAI 画笔圈跟着笔，但系统光标停在旧位置。原因：Winlator 原生只在拖动/
+> 长按时移动 pointer，悬停不动。0.3.6 起 `PenBridge.handle()` 对每个笔事件都调用
+> `injectPointerMove`（包括 HOVER_MOVE），系统光标与画笔圈同步。详见 [13](./13-pen-cursor-follow.md)。
+
 > **2026-11-20 21:30（鼠标滚轮）**
 > 滚轮原来被 Winlator 原样转成 X11 button 4/5，SAI 收到的效果是"上下移动画布"。
 > 0.3.5 起在 `TouchpadView` 的 `ACTION_SCROLL` 分支直接翻译成 PageUp/PageDown，

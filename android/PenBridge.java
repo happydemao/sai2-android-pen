@@ -265,6 +265,12 @@ B64_8
             // 1) 压感采样（手指与笔都送）
             //    笔自己会在抬笔后继续送悬停事件，不需要我们补；只有手指没有悬停流。
             final boolean pen = isPen(ev);
+
+            // 笔的每个事件都把系统鼠标光标移到笔尖，包括 HOVER_MOVE。
+            // 原生 TouchpadView 只在拖动/按下时移动光标；SAI 的画笔圈却从一开始
+            // 就跟着悬停的笔，结果就是"圈在笔尖、系统光标还停在旧位置"。
+            if (pen) moveCursorTo(pad, x, y);
+
             emit(x, y, pressure, action, !pen);
 
             // 2) 只有"鼠标型笔"才合成左键（正规 STYLUS 交给 Winlator 原生处理）
@@ -318,6 +324,16 @@ B64_8
             logWriter.write(s + "\n");
             logWriter.flush();
             logCount++;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void moveCursorTo(View pad, int x, int y) {
+        resolveReflection();
+        try {
+            if (fXServer == null || mInjectPointerMove == null) return;
+            Object xs = fXServer.get(pad);
+            if (xs != null) mInjectPointerMove.invoke(xs, x, y);
         } catch (Throwable ignored) {
         }
     }
