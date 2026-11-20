@@ -19,6 +19,14 @@
 > 而 `SOURCE_MOUSE(0x2002)` 含 `SOURCE_CLASS_POINTER(0x0002)`，S Pen 的 `0x5002` 同样带这一位 →
 > 误判成"鼠标型笔"，在原生已经点击的基础上又合成一次。改成只认 `0x2000` 位后修复。
 > 该设备 `logcat` 完全不可用，排错改看 `/data/data/com.winlator/files/pb.log`。
+
+> **2026-11-20 21:00（蓝牙键盘）**
+> MCHOSE G75 V2 5.0（BLE 复合键盘）在容器里一个键都不进，USB 键盘正常。
+> 根因不是输入法/焦点，而是 `ExternalController.isGameController()` 只按 `getSources()` 判定：
+> 该键盘为了多媒体/鼠标报告同时声明了 `JOYSTICK|DPAD`，被当成手柄 →
+> `Keyboard.onKeyEvent()` 直接 `return false`。修复：全字母键盘
+> （`getKeyboardType() == KEYBOARD_TYPE_ALPHABETIC`）不再判为手柄。
+> 实测方法返回值由 `true` 变 `false`。详见 [11-bluetooth-keyboard-fix.md](./11-bluetooth-keyboard-fix.md)。
 >
 > **2026-11-18 12:05**：关掉合成后"拖动"消失了（原生单指 MOVE 从不按左键，只有 `isTap()`
 > 即 <200ms 且 <10px 才点一次）。已改成两种笔分开处理：鼠标型笔接触即按下；

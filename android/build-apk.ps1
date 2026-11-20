@@ -174,6 +174,38 @@ $t = Patch-Once $t @'
 
 [System.IO.File]::WriteAllText($tp, $t, (New-Object System.Text.UTF8Encoding($false)))
 
+# ------------------------------------ 3b. composite BLE keyboard / gamepad fix
+# MCHOSE G75 V2 (and similar BLE keyboards) expose KEYBOARD|MOUSE|DPAD|JOYSTICK.
+# The source-only test in ExternalController.isGameController() then classified the
+# keyboard as a gamepad, so xserver.Keyboard.onKeyEvent() returned false before
+# looking at a single keycode. Full alphabetic keyboards must never be gamepads.
+Step 'Patch ExternalController.smali (BLE keyboard)'
+$ec = Join-Path $smaliDir 'com\winlator\inputcontrols\ExternalController.smali'
+$t = NormalizeLF (Get-Content $ec -Raw -Encoding UTF8)
+
+$t = Patch-Once $t @'
+    invoke-virtual {p0}, Landroid/view/InputDevice;->getName()Ljava/lang/String;
+'@ @'
+    # A full alphabetic keyboard must not be classified as a gamepad. Composite BLE
+    # keyboards advertise JOYSTICK|DPAD sources for their media/mouse reports; the
+    # source-only test below then treated the whole device as a controller, and
+    # Keyboard.onKeyEvent() returned early for every key.
+    invoke-virtual {p0}, Landroid/view/InputDevice;->getKeyboardType()I
+
+    move-result v3
+
+    const/4 v4, 0x2
+
+    if-ne v3, v4, :cond_not_alphabetic_keyboard
+
+    return v0
+
+    :cond_not_alphabetic_keyboard
+    invoke-virtual {p0}, Landroid/view/InputDevice;->getName()Ljava/lang/String;
+'@ 'external controller keyboard guard'
+
+[System.IO.File]::WriteAllText($ec, $t, (New-Object System.Text.UTF8Encoding($false)))
+
 # --------------------------------------------------------------- 4. assemble
 Step 'smali assemble'
 $newDex = Join-Path $stage 'classes-patched.dex'
