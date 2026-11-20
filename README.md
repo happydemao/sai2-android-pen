@@ -91,7 +91,7 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | 数位板压感进入 SAI（实测 1 ms 中位延迟、gaps=0） | ✅ |
 | 发送端编进 APK，无 root、无命令、无常驻进程 | ✅ |
 | 用笔点 UI（任务栏、菜单、工具栏） | ✅ 两种笔都验证过（BLE 笔 / S Pen） |
-| 外接键盘 | ✅ USB 直接可用；复合 BLE 键盘（MCHOSE G75 V2）已修并内置到 0.3.3，见 [11](./docs/11-bluetooth-keyboard-fix.md) |
+| 外接键盘 | ✅ USB 直接可用；复合 BLE 键盘（MCHOSE G75 V2）已修，0.3.4 起内置，见 [11](./docs/11-bluetooth-keyboard-fix.md) |
 | 手指操作 UI | ⚠️ 可用，双击仍偏难 |
 | 倾斜 / 橡皮 | ⏸ 未做（evdev 有数据，协议无字段，需重编 DLL） |
 | SAI 首笔弹 `FileError(161)` | ⚠️ SAI×Wine 兼容问题，非致命，不影响作画与撤销 |

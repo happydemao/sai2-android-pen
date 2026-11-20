@@ -10,7 +10,8 @@
 于是 `xserver.Keyboard.onKeyEvent()` 在读到键码之前就 `return false`，按键被整体丢弃。
 
 > 0.3.0 → 0.3.3 的 `classes.dex` 字节完全相同，所以同一份补丁可以直接打进 0.3.3。
-> 已生成并安装 `Winlator-11.2-SAIPen-0.3.3-keyboard.apk`（保留原签名、`adb install -r` 不丢容器）。
+> 该修复随 **v0.3.4** 发布：`Winlator-11.2-SAIPen-0.3.4.apk`（0.3.3 + 键盘修复，
+> 保留原签名，可直接覆盖安装、不丢容器）。
 
 ```
 Android KeyEvent (device 29, MCHOSE G75 V2 5.0 Keyboard)
