@@ -20,6 +20,12 @@
 > 误判成"鼠标型笔"，在原生已经点击的基础上又合成一次。改成只认 `0x2000` 位后修复。
 > 该设备 `logcat` 完全不可用，排错改看 `/data/data/com.winlator/files/pb.log`。
 
+> **2026-11-20 21:30（鼠标滚轮）**
+> 滚轮原来被 Winlator 原样转成 X11 button 4/5，SAI 收到的效果是"上下移动画布"。
+> 0.3.5 起在 `TouchpadView` 的 `ACTION_SCROLL` 分支直接翻译成 PageUp/PageDown，
+> 由 `PenBridge` 注入给 SAI（SAI 默认以光标为中心缩放）。实测 75%→50%→75%。
+> 双指触摸板滚动保持不变。详见 [12-wheel-zoom.md](./12-wheel-zoom.md)。
+
 > **2026-11-20 21:00（蓝牙键盘）**
 > MCHOSE G75 V2 5.0（BLE 复合键盘）在容器里一个键都不进，USB 键盘正常。
 > 根因不是输入法/焦点，而是 `ExternalController.isGameController()` 只按 `getSources()` 判定：

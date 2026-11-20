@@ -82,6 +82,7 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | [09-install-tutorial.md](./docs/09-install-tutorial.md) | **图文安装教程**（新手向，三步装完） |
 | [10-releasing.md](./docs/10-releasing.md) | 发布清单：Release 附件、LGPL 义务、不要提交什么 |
 | [11-bluetooth-keyboard-fix.md](./docs/11-bluetooth-keyboard-fix.md) | 蓝牙键盘不进容器：复合 BLE 键盘被误判成手柄的根因与修复 |
+| [12-wheel-zoom.md](./docs/12-wheel-zoom.md) | 鼠标滚轮改为以光标为中心缩放画布 |
 
 ## 已验证的能力
 
@@ -92,6 +93,7 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | 发送端编进 APK，无 root、无命令、无常驻进程 | ✅ |
 | 用笔点 UI（任务栏、菜单、工具栏） | ✅ 两种笔都验证过（BLE 笔 / S Pen） |
 | 外接键盘 | ✅ USB 直接可用；复合 BLE 键盘（MCHOSE G75 V2）已修，0.3.4 起内置，见 [11](./docs/11-bluetooth-keyboard-fix.md) |
+| 鼠标滚轮缩放画布 | ✅ 0.3.5 起，滚轮映射为 PageUp/PageDown，见 [12](./docs/12-wheel-zoom.md) |
 | 手指操作 UI | ⚠️ 可用，双击仍偏难 |
 | 倾斜 / 橡皮 | ⏸ 未做（evdev 有数据，协议无字段，需重编 DLL） |
 | SAI 首笔弹 `FileError(161)` | ⚠️ SAI×Wine 兼容问题，非致命，不影响作画与撤销 |

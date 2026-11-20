@@ -87,6 +87,11 @@ public final class PenBridge {
     private static Method mInjectPress;
     private static Method mInjectRelease;
     private static Object BUTTON_LEFT;
+    private static Method mInjectKeyPress;
+    private static Method mInjectKeyRelease;
+    private static Object KEY_PRIOR;
+    private static Object KEY_NEXT;
+    private static boolean wheelLogged;
 
     /** 我们合成出来的左键是否处于按下状态。 */
     private static boolean penDown;
@@ -167,6 +172,38 @@ B64_8
             }
         } catch (Throwable t) {
             try { Log.w(TAG, "ensureBridgeFiles: " + t); } catch (Throwable ignored) { }
+        }
+    }
+
+    /**
+     * 物理滚轮 -> SAI 缩放。
+     *
+     * SAI 默认把 PageUp/PageDown 绑定为「以光标为中心放大/缩小」。Winlator 把滚轮
+     * 原样转成 X11 button 4/5 时，SAI 收到的是滚动而不是缩放（实测在 [PivInk]SAI 上
+     * 画布会上下移动）。这里在 Android 侧直接把滚轮翻译成 PageUp/PageDown，
+     * 不再依赖 Wine 的滚轮消息路径。
+     */
+    public static void zoomIn(View pad) { wheelZoom(pad, true); }
+
+    public static void zoomOut(View pad) { wheelZoom(pad, false); }
+
+    private static void wheelZoom(View pad, boolean in) {
+        if (pad == null) return;
+        resolveReflection();
+        try {
+            if (fXServer == null || mInjectKeyPress == null || mInjectKeyRelease == null) return;
+            Object xs = fXServer.get(pad);
+            if (xs == null) return;
+            Object key = in ? KEY_PRIOR : KEY_NEXT;
+            mInjectKeyPress.invoke(xs, key);
+            mInjectKeyRelease.invoke(xs, key);
+            if (!wheelLogged) {
+                wheelLogged = true;
+                note("wheel -> " + (in ? "PageUp" : "PageDown") + " (SAI zoom)");
+                flog("wheel zoom " + (in ? "in" : "out"));
+            }
+        } catch (Throwable t) {
+            try { Log.w(TAG, "wheelZoom: " + t); } catch (Throwable ignored) { }
         }
     }
 
@@ -592,6 +629,12 @@ B64_8
             BUTTON_LEFT = btnCls.getField("BUTTON_LEFT").get(null);
             mInjectPress = xsCls.getMethod("injectPointerButtonPress", btnCls);
             mInjectRelease = xsCls.getMethod("injectPointerButtonRelease", btnCls);
+
+            Class<?> keyCls = Class.forName("com.winlator.xserver.XKeycode");
+            KEY_PRIOR = keyCls.getField("KEY_PRIOR").get(null);
+            KEY_NEXT = keyCls.getField("KEY_NEXT").get(null);
+            mInjectKeyPress = xsCls.getMethod("injectKeyPress", keyCls);
+            mInjectKeyRelease = xsCls.getMethod("injectKeyRelease", keyCls);
 
             Log.d(TAG, "reflect ok xServer=" + (fXServer != null)
                     + " xform=" + (fXform != null)

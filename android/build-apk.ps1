@@ -172,6 +172,47 @@ $t = Patch-Once $t @'
 
 '@ + $call) 'D onExternalMouseEvent'
 
+# E. physical mouse wheel -> PageUp/PageDown (SAI zoom at cursor).
+# Winlator's default wheel path injects X11 buttons 4/5; SAI receives that as view
+# scrolling. SAI binds PageUp/PageDown to zoom, so translate the wheel in Android.
+$t = Patch-Once $t @'
+    .line 387
+    iget-object v3, p0, Lcom/winlator/widget/TouchpadView;->xServer:Lcom/winlator/xserver/XServer;
+
+    sget-object v4, Lcom/winlator/xserver/Pointer$Button;->BUTTON_SCROLL_DOWN:Lcom/winlator/xserver/Pointer$Button;
+
+    invoke-virtual {v3, v4}, Lcom/winlator/xserver/XServer;->injectPointerButtonPress(Lcom/winlator/xserver/Pointer$Button;)V
+
+    .line 388
+    iget-object v3, p0, Lcom/winlator/widget/TouchpadView;->xServer:Lcom/winlator/xserver/XServer;
+
+    sget-object v4, Lcom/winlator/xserver/Pointer$Button;->BUTTON_SCROLL_DOWN:Lcom/winlator/xserver/Pointer$Button;
+
+    invoke-virtual {v3, v4}, Lcom/winlator/xserver/XServer;->injectPointerButtonRelease(Lcom/winlator/xserver/Pointer$Button;)V
+'@ @'
+    .line 387
+    invoke-static {p0}, Lcom/winlator/sai/PenBridge;->zoomOut(Landroid/view/View;)V
+'@ 'E wheel down -> zoom out'
+
+$t = Patch-Once $t @'
+    .line 391
+    iget-object v3, p0, Lcom/winlator/widget/TouchpadView;->xServer:Lcom/winlator/xserver/XServer;
+
+    sget-object v4, Lcom/winlator/xserver/Pointer$Button;->BUTTON_SCROLL_UP:Lcom/winlator/xserver/Pointer$Button;
+
+    invoke-virtual {v3, v4}, Lcom/winlator/xserver/XServer;->injectPointerButtonPress(Lcom/winlator/xserver/Pointer$Button;)V
+
+    .line 392
+    iget-object v3, p0, Lcom/winlator/widget/TouchpadView;->xServer:Lcom/winlator/xserver/XServer;
+
+    sget-object v4, Lcom/winlator/xserver/Pointer$Button;->BUTTON_SCROLL_UP:Lcom/winlator/xserver/Pointer$Button;
+
+    invoke-virtual {v3, v4}, Lcom/winlator/xserver/XServer;->injectPointerButtonRelease(Lcom/winlator/xserver/Pointer$Button;)V
+'@ @'
+    .line 391
+    invoke-static {p0}, Lcom/winlator/sai/PenBridge;->zoomIn(Landroid/view/View;)V
+'@ 'E wheel up -> zoom in'
+
 [System.IO.File]::WriteAllText($tp, $t, (New-Object System.Text.UTF8Encoding($false)))
 
 # ------------------------------------ 3b. composite BLE keyboard / gamepad fix
