@@ -226,10 +226,12 @@ B64_8
             }
 
             // 1) 压感采样（手指与笔都送）
-            emit(x, y, pressure, action);
+            //    笔自己会在抬笔后继续送悬停事件，不需要我们补；只有手指没有悬停流。
+            final boolean pen = isPen(ev);
+            emit(x, y, pressure, action, !pen);
 
             // 2) 只有"鼠标型笔"才合成左键（正规 STYLUS 交给 Winlator 原生处理）
-            if (isPen(ev)) {
+            if (pen) {
                 if (!loggedPen) {
                     loggedPen = true;
                     note("pen src=0x" + Integer.toHexString(ev.getSource())
@@ -601,7 +603,7 @@ B64_8
 
     // ---------------------------------------------------------------- UDP 发送
 
-    private static void emit(int x, int y, float pressure, int action) {
+    private static void emit(int x, int y, float pressure, int action, boolean simulateHover) {
         try {
             if (disabled) return;
 
@@ -612,7 +614,10 @@ B64_8
             final boolean pressing = (action == 0 || action == 5);
 
             if (lifting) {
-                // 抬笔：先发 p=0 的抬笔样本，再补两个"悬停"样本（压力 0、位置各挪 1~2 px）。
+                // 抬笔：先发 p=0 的抬笔样本；手指没有悬停流，再补两个"悬停"样本
+                // （压力 0、位置各挪 1~2 px），否则 SAI 不收笔，下一笔会从这一笔的终点连过去。
+                // 笔自己会继续送 HOVER_MOVE，不能替它补：多余的零压样本会扰乱笔的起笔/压力，
+                // 实测 0.3.2 给笔也补之后，轻画几乎不出墨、要用力才出线。
                 //
                 // 这是"两笔首尾相连"的真正原因（真机实测）：SAI 的 WinTab 笔画不会因为
                 // 一个和最后一个点位置相同的零压包而结束。真实数位板抬笔后笔还在感应区里
@@ -625,12 +630,16 @@ B64_8
                 // 变成"抬笔之后又来一个 p>0"，等于重新落笔。
                 synchronized (LOCK) {
                     hasPending = false;
-                    if (CRIT.size() > 28) CRIT.clear();
-                    // 靠右边缘时往外挪会被 send() 夹到同一个像素，往回挪
-                    final int dx = (x + 2 < screenW) ? 1 : -1;
-                    CRIT.add(new int[]{x, y, 0});
-                    CRIT.add(new int[]{x + dx, y, 0});
-                    CRIT.add(new int[]{x + 2 * dx, y, 0});
+                    if (simulateHover) {
+                        if (CRIT.size() > 28) CRIT.clear();
+                        // 靠右边缘时往外挪会被 send() 夹到同一个像素，往回挪
+                        final int dx = (x + 2 < screenW) ? 1 : -1;
+                        CRIT.add(new int[]{x, y, 0});
+                        CRIT.add(new int[]{x + dx, y, 0});
+                        CRIT.add(new int[]{x + 2 * dx, y, 0});
+                    } else {
+                        CRIT.add(new int[]{x, y, 0});
+                    }
                     LOCK.notifyAll();
                     ensureWorker();
                 }
@@ -649,7 +658,10 @@ B64_8
 
             synchronized (LOCK) {
                 if (pressing) {
-                    // 落笔样本排队，不合并；队列有上限防止极端情况爆内存
+                    // 落笔样本排队，不合并；队列有上限防止极端情况爆内存。
+                    // 同时丢掉这里之前排队的样本：抬笔/悬停的 p=0 若排在新一笔的 DOWN 之后发出，
+                    // 会把刚起笔的这一笔立刻收掉（轻画时最明显——几乎没有墨）。
+                    hasPending = false;
                     if (CRIT.size() < 32) CRIT.add(new int[]{x, y, p});
                     LOCK.notifyAll();
                     ensureWorker();
