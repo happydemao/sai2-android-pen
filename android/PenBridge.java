@@ -90,6 +90,8 @@ public final class PenBridge {
 
     /** 我们合成出来的左键是否处于按下状态。 */
     private static boolean penDown;
+    /* 手指按下期间（按下由 Winlator 原生补丁处理，我们只负责兜底松手） */
+    private static boolean fingerActive;
     private static long lastPenEventMs;
     /** 只在第一次见到笔时打一条诊断日志（设备源类型）。 */
     private static boolean loggedPen;
@@ -225,6 +227,25 @@ B64_8
                 } else {
                     // 正规 STYLUS（S Pen）：原生 tap 已经会点，我们只在拖动/长按时补按下
                     syncDragOnly(pad, x, y, pressure, ev, action);
+                }
+            } else {
+                // 手指：按下由 Winlator 原生补丁在 onTouchEvent 里做，我们不掺和；
+                // 但原生的"松手"是靠 postDelayed 排队的，快速连续两笔时上一次的松开
+                // 可能被下一次按下顶掉，表现为**连笔**。这里在 UP/CANCEL 同步补一次松开，
+                // 并且按下后挂一个静默看门狗，防止 UP 丢失时左键一直按着。
+                if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+                    fingerActive = true;
+                    lastPenEventMs = SystemClock.uptimeMillis();
+                    armReleaseWatchdog(pad);
+                } else if (action == MotionEvent.ACTION_MOVE) {
+                    lastPenEventMs = SystemClock.uptimeMillis();
+                } else if (action == MotionEvent.ACTION_UP
+                        || action == MotionEvent.ACTION_CANCEL
+                        || action == MotionEvent.ACTION_POINTER_UP) {
+                    if (fingerActive) {
+                        fingerActive = false;
+                        forceRelease(pad, "finger-up act=" + action);
+                    }
                 }
             }
         } catch (Throwable ignored) {
@@ -391,7 +412,7 @@ B64_8
             pad.postDelayed(new Runnable() {
                 @Override public void run() {
                     try {
-                        if (!penDown && !dragPressed) return;
+                        if (!penDown && !dragPressed && !fingerActive) return;
                         long gap = SystemClock.uptimeMillis() - lastPenEventMs;
                         if (gap < LOST_MS) {
                             pad.postDelayed(this, LOST_MS - gap + 50);
@@ -407,18 +428,26 @@ B64_8
     /** 把可能按下的左键统一松开（幂等）。 */
     private static void releaseAll(View pad, String why) {
         try {
+            boolean did = false;
+            if (penDown) { penDown = false; did = true; }
+            if (dragPressed) { dragPressed = false; did = true; }
+            if (fingerActive) { fingerActive = false; did = true; }
+            if (did) {
+                forceRelease(pad, why);
+                note("PEN_UP " + why);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 无条件松开左键（对没按下的情况也就是多发一次 release，无害）。 */
+    private static void forceRelease(View pad, String why) {
+        try {
             resolveReflection();
             if (fXServer == null || mInjectRelease == null || BUTTON_LEFT == null) return;
             Object xs = fXServer.get(pad);
             if (xs == null) return;
-            boolean did = false;
-            if (penDown) { penDown = false; did = true; }
-            if (dragPressed) { dragPressed = false; did = true; }
-            if (did) {
-                mInjectRelease.invoke(xs, BUTTON_LEFT);
-                note("PEN_UP " + why);
-                flog("RELEASE " + why);
-            }
+            mInjectRelease.invoke(xs, BUTTON_LEFT);
+            flog("RELEASE " + why);
         } catch (Throwable ignored) { }
     }
 
