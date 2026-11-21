@@ -86,7 +86,8 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | [13-pen-cursor-follow.md](./docs/13-pen-cursor-follow.md) | 系统鼠标光标跟随内置笔的悬停/落笔 |
 | [15-touch-gestures.md](./docs/15-touch-gestures.md) | 触控屏手势：两指撤销、三指重做、平移/缩放/旋转、快捏适合窗口 |
 | [16-winlator-chinese.md](./docs/16-winlator-chinese.md) | Winlator 主界面汉化：中文资源、zh_CN 语言项、安装与切换 |
-| [17-branding.md](./docs/17-branding.md) | 应用名与启动图标：winlator for sai |
+| [17-branding.md](./docs/17-branding.md) | 应用名与启动图标：Winlator for sai |
+| [18-universal-wintab.md](./docs/18-universal-wintab.md) | 通用 WinTab：按应用 packet 布局 + polling + 32/64 位 DLL |
 
 ## 已验证的能力
 
@@ -104,6 +105,7 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | 应用名 / 图标 | ✅ 0.3.9，`Winlator for sai` + 新图标，见 [17](./docs/17-branding.md) |
 | 虚拟鼠标按钮光标 | ✅ 0.3.9，按下时先把光标移到手指位置再点击，见 [13](./docs/13-pen-cursor-follow.md) |
 | 关闭抖动修正后的直线 | 🔧 0.3.10 改用 8 倍定点坐标，待真机确认，见 [03](./docs/03-wintab-dll-protocol.md) |
+| 通用 WinTab 压感 | 🔧 0.3.11 按应用 lcPktData 构造报文，支持 FireAlpaca 的 WTPacketsGet，见 [18](./docs/18-universal-wintab.md) |
 | 手指操作 UI | ⚠️ 可用，双击仍偏难 |
 | 倾斜 / 橡皮 | ⏸ 未做（evdev 有数据，协议无字段，需重编 DLL） |
 | SAI 首笔弹 `FileError(161)` | ⚠️ SAI×Wine 兼容问题，非致命，不影响作画与撤销 |

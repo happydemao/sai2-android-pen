@@ -47,13 +47,20 @@ typedef struct {
 } LOGCONTEXTW;
 
 /* packet field-mask bits (WTPKT) */
+#define PK_CONTEXT 0x0001u
 #define PK_STATUS 0x0002u
+#define PK_TIME 0x0004u
+#define PK_CHANGED 0x0008u
+#define PK_SERIAL_NUMBER 0x0010u
 #define PK_CURSOR 0x0020u
 #define PK_BUTTONS 0x0040u
 #define PK_X 0x0080u
 #define PK_Y 0x0100u
+#define PK_Z 0x0200u
 #define PK_NORMAL_PRESSURE 0x0400u
+#define PK_TANGENT_PRESSURE 0x0800u
 #define PK_ORIENTATION 0x1000u
+#define PK_ROTATION 0x2000u
 #define OUR_PKTDATA (PK_STATUS|PK_CURSOR|PK_BUTTONS|PK_X|PK_Y|PK_NORMAL_PRESSURE|PK_ORIENTATION) /* 0x15e2 */
 
 #define WT_DEFBASE 0x7ff0
@@ -115,6 +122,52 @@ _Static_assert(offsetof(OURPKT, y)        == 16, "OURPKT.y moved");
 _Static_assert(offsetof(OURPKT, pressure) == 20, "OURPKT.pressure moved: SAI would read the wrong field");
 _Static_assert(offsetof(OURPKT, orAzimuth) == 24, "OURPKT.orAzimuth moved");
 
+/* Build one packet in the field order requested by the app's lcPktData.
+ * Wintab lays fields out low-bit-first, tightly packed. SAI asks for 0x15e2
+ * (36 bytes) and this reproduces the old OURPKT byte-for-byte; FireAlpaca
+ * asks for 0x1fe0 (40 bytes, includes Z and tangential pressure). Honour the
+ * app's mask instead of forcing SAI's, otherwise polling apps read pressure
+ * from the wrong offset. */
+static int wt_packet_size(WTPKT mask) {
+    int n = 0;
+    if (mask & PK_CONTEXT) n += 4;
+    if (mask & PK_STATUS) n += 4;
+    if (mask & PK_TIME) n += 4;
+    if (mask & PK_CHANGED) n += 4;
+    if (mask & PK_SERIAL_NUMBER) n += 4;
+    if (mask & PK_CURSOR) n += 4;
+    if (mask & PK_BUTTONS) n += 4;
+    if (mask & PK_X) n += 4;
+    if (mask & PK_Y) n += 4;
+    if (mask & PK_Z) n += 4;
+    if (mask & PK_NORMAL_PRESSURE) n += 4;
+    if (mask & PK_TANGENT_PRESSURE) n += 4;
+    if (mask & PK_ORIENTATION) n += 12;
+    if (mask & PK_ROTATION) n += 12;
+    return n;
+}
+
+static int wt_build_packet(const OURPKT *pk, UINT serial, WTPKT mask, void *buf) {
+    unsigned char *p = (unsigned char *)buf;
+    #define PUT32(v) do { UINT _v = (UINT)(v); memcpy(p, &_v, 4); p += 4; } while (0)
+    if (mask & PK_CONTEXT) PUT32(0xC0FFEE01u);
+    if (mask & PK_STATUS) PUT32(pk->status);
+    if (mask & PK_TIME) PUT32(GetTickCount());
+    if (mask & PK_CHANGED) PUT32(mask);
+    if (mask & PK_SERIAL_NUMBER) PUT32(serial);
+    if (mask & PK_CURSOR) PUT32(pk->cursor);
+    if (mask & PK_BUTTONS) PUT32(pk->buttons);
+    if (mask & PK_X) PUT32(pk->x);
+    if (mask & PK_Y) PUT32(pk->y);
+    if (mask & PK_Z) PUT32(0);
+    if (mask & PK_NORMAL_PRESSURE) PUT32(pk->pressure);
+    if (mask & PK_TANGENT_PRESSURE) PUT32(0);
+    if (mask & PK_ORIENTATION) { PUT32(pk->orAzimuth); PUT32(pk->orAltitude); PUT32(pk->orTwist); }
+    if (mask & PK_ROTATION) { PUT32(0); PUT32(0); PUT32(0); }
+    #undef PUT32
+    return (int)(p - (unsigned char *)buf);
+}
+
 /* WinTab categories */
 #define WTI_INTERFACE 1
 #define WTI_DEFCONTEXT 3
@@ -142,8 +195,17 @@ static UINT   g_last_serial;
                                   message bursts, causing straight "boxy" segments */
 static OURPKT g_ring[RING_SZ];
 static UINT   g_ring_serial[RING_SZ];
-static LOGCONTEXTW g_ctx;      /* the context SAI asked for in WTOpenW/WTSetW */
+static LOGCONTEXTW g_ctx;      /* the context the app asked for in WTOpenW/WTSetW */
 static BOOL  g_have_ctx;
+/* Polling mode: apps such as FireAlpaca never fetch via WTPacket; they poll
+ * WTPacketsGet. In that mode every sample must go into the ring (no conflation
+ * tied to g_fetched), and delivery has its own cursor. */
+static volatile int g_polling;
+static UINT g_deliver_serial;
+/* The mask the app originally asked for. WTOpenW still returns OUR_PKTDATA to
+ * SAI, but polling apps (FireAlpaca) interpret the buffer with their own mask;
+ * WTPacketsGet builds that layout. */
+static WTPKT g_app_pktdata;
 static CRITICAL_SECTION g_cs;
 static FILE  *g_log;
 static volatile DWORD g_last_tip_tick;   /* GetTickCount of the last pen-tip
@@ -356,7 +418,7 @@ static void st_report(DWORD now, int force) {
  * the same as before. */
 static HHOOK g_click_hook;         /* defined with the hook, further down */
 static WTC_HOLD g_hold;
-static const int g_hold_on = 1;   /* always: no switch (wintab_core.h) */
+static int g_hold_on = 1;   /* SAI: on; polling apps: off */
 static int   g_ld_have;            /* SAI has taken a left click at all */
 static DWORD g_ld_tick;            /* ...and when the newest one */
 static unsigned long g_hold_by[3]; /* holds ended by: 0 time limit, 1 click, 2 pen lifted */
@@ -594,7 +656,8 @@ static void emit_sample(const SAMPLE *s) {
         g_ring[ser % RING_SZ] = pk;
         g_ring_time[ser % RING_SZ] = GetTickCount();
         g_dirty = 0;
-    } else if ((post = wtc_should_post(g_serial, g_fetched, transition, POST_WINDOW)) != 0) {
+    } else if (g_polling || (post = wtc_should_post(g_serial, g_fetched, transition, POST_WINDOW)) != 0) {
+        if (g_polling) post = TRUE;   /* polling apps consume the ring, not messages */
         ser = g_serial++;
         g_last_serial = ser;
         g_ring_serial[ser % RING_SZ] = ser;
@@ -1454,10 +1517,17 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
     }
     g_open = enable ? TRUE : FALSE;
     if (lc) {
-        log_ctx("WTOpenW ctx from SAI", lc);
-        lc->lcPktData = OUR_PKTDATA; lc->lcMsgBase = WT_DEFBASE;
+        log_ctx("WTOpenW ctx from app", lc);
         EnterCriticalSection(&g_cs);
+        g_app_pktdata = lc->lcPktData ? lc->lcPktData : OUR_PKTDATA;
+        /* SAI asks exactly for OUR_PKTDATA; any other mask is a polling app
+         * (FireAlpaca asks 0x1fe0). Do not apply SAI's click-hold / message
+         * conflation to those: they wait for packets and would never start. */
+        g_polling = (g_app_pktdata != OUR_PKTDATA) ? 1 : 0;
+        g_hold_on = (g_app_pktdata == OUR_PKTDATA) ? 1 : 0;
+        lc->lcPktData = OUR_PKTDATA; lc->lcMsgBase = WT_DEFBASE;
         g_ctx = *lc; g_have_ctx = TRUE;
+        g_deliver_serial = g_serial;
         LeaveCriticalSection(&g_cs);
     }
     return (HANDLE)(ULONG_PTR)0xC0FFEE01;
@@ -1472,11 +1542,14 @@ int WINAPI WTPacket(HANDLE ctx, UINT serial, LPVOID buf) {
     static LONG count;
     (void)ctx;
     if (!buf) return 0;
+    OURPKT pk;
+    WTPKT mask;
     EnterCriticalSection(&g_cs);
-    OURPKT pk = (g_ring_serial[serial % RING_SZ] == serial) ? g_ring[serial % RING_SZ] : g_last;
+    pk = (g_ring_serial[serial % RING_SZ] == serial) ? g_ring[serial % RING_SZ] : g_last;
+    mask = g_have_ctx ? g_ctx.lcPktData : OUR_PKTDATA;
     if (g_trace_start) wtc_st_fetch(&g_st, GetTickCount(), serial);
     LeaveCriticalSection(&g_cs);
-    memcpy(buf, &pk, sizeof(pk));       /* 36 bytes, layout 0x15e2 */
+    wt_build_packet(&pk, serial, mask, buf);   /* layout follows lcPktData */
     g_fetched = serial;                 /* track how current SAI is (backlog probe) */
     g_fetch_count++;                    /* points SAI actually drew (draw-rate probe) */
     LONG n = InterlockedIncrement(&count);
@@ -1514,20 +1587,42 @@ BOOL WINAPI WTGetW(HANDLE ctx, LOGCONTEXTW *lc) {
     return TRUE;
 }
 BOOL WINAPI WTEnable(HANDLE ctx, BOOL enable) { log_line("WTEnable enable=%d", enable); (void)ctx; g_open = enable?TRUE:FALSE; return TRUE; }
-int  WINAPI WTPacketsGet(HANDLE ctx, int max, LPVOID buf) {
-    log_line("WTPacketsGet max=%d", max);
-    (void)ctx;
+static int wt_fetch_packets(int max, LPVOID buf, int advance) {
     if (max <= 0 || !buf) return 0;
+    int n = 0;
+    WTPKT mask;
+    UINT start, end;
+    int size;
     EnterCriticalSection(&g_cs);
-    OURPKT pk = g_last;
+    g_polling = 1;
+    mask = g_app_pktdata ? g_app_pktdata : OUR_PKTDATA;
+    size = wt_packet_size(mask);
+    end = g_serial;
+    start = g_deliver_serial;
+    if (start > end) start = end;
+    if ((UINT)(end - start) > RING_SZ) start = end - RING_SZ;
+    while (size > 0 && n < max && start != end) {
+        if (g_ring_serial[start % RING_SZ] != start) { start++; continue; }
+        wt_build_packet(&g_ring[start % RING_SZ], start, mask,
+                        (unsigned char *)buf + (size_t)n * size);
+        start++;
+        n++;
+    }
+    if (advance) {
+        g_deliver_serial = start;
+        if (n > 0) {
+            g_fetched = start - 1;     /* watchdog: producer is being consumed */
+            g_fetch_count += n;
+        }
+    }
     LeaveCriticalSection(&g_cs);
-    /* read_pressure() does file I/O and only touches g_sample (not g_cs-guarded
-     * state), so keep it OUT of the critical section — don't hold the lock
-     * across blocking I/O. */
-    int have = (read_pressure() > 0);
-    if (!have) return 0;
-    memcpy(buf, &pk, sizeof(pk));
-    return 1;
+    if (n > 0) log_line("WTPacketsGet n=%d size=%d poll=%d", n, size, advance);
+    return n;
+}
+
+int  WINAPI WTPacketsGet(HANDLE ctx, int max, LPVOID buf) {
+    (void)ctx;
+    return wt_fetch_packets(max, buf, 1);
 }
 
 /* ---- ANSI variants (SAI's "Ver.1 compatible" path may use these) ---------- */
@@ -1588,7 +1683,18 @@ HANDLE WINAPI WTOpenA(HWND hwnd, LOGCONTEXTA *lc, BOOL enable) {
     log_line("WTOpenA hwnd=%p enable=%d", hwnd, enable);
     g_hwnd = hwnd;
     g_open = enable ? TRUE : FALSE;
-    if (lc) { lc->lcPktData = OUR_PKTDATA; lc->lcMsgBase = WT_DEFBASE; }
+    if (lc) {
+        EnterCriticalSection(&g_cs);
+        g_app_pktdata = lc->lcPktData ? lc->lcPktData : OUR_PKTDATA;
+        g_polling = (g_app_pktdata != OUR_PKTDATA) ? 1 : 0;
+        g_hold_on = (g_app_pktdata == OUR_PKTDATA) ? 1 : 0;
+        lc->lcPktData = OUR_PKTDATA; lc->lcMsgBase = WT_DEFBASE;
+        LOGCONTEXTW w; fill_default_context(&w);
+        w.lcPktData = OUR_PKTDATA; w.lcMsgBase = WT_DEFBASE;
+        g_ctx = w; g_have_ctx = TRUE;
+        g_deliver_serial = g_serial;
+        LeaveCriticalSection(&g_cs);
+    }
     return (HANDLE)(ULONG_PTR)0xC0FFEE01;
 }
 
@@ -1615,7 +1721,7 @@ BOOL WINAPI WTExtGet(HANDLE ctx, UINT ext, LPVOID out) { log_line("WTExtGet ext=
 BOOL WINAPI WTExtSet(HANDLE ctx, UINT ext, LPVOID in) { log_line("WTExtSet ext=%u", ext); (void)ctx; (void)in; return FALSE; }
 BOOL WINAPI WTSave(HANDLE ctx, LPVOID save) { log_line("WTSave"); (void)ctx; (void)save; return FALSE; }
 HANDLE WINAPI WTRestore(HWND hwnd, LPVOID save, BOOL enable) { log_line("WTRestore"); (void)hwnd; (void)save; (void)enable; return NULL; }
-int  WINAPI WTPacketsPeek(HANDLE ctx, int max, LPVOID buf) { log_line("WTPacketsPeek max=%d", max); return WTPacketsGet(ctx, max, buf); }
+int  WINAPI WTPacketsPeek(HANDLE ctx, int max, LPVOID buf) { (void)ctx; return wt_fetch_packets(max, buf, 0); }
 int  WINAPI WTDataGet(HANDLE ctx, UINT b, UINT e, int max, LPVOID buf, LPINT n) { log_line("WTDataGet"); (void)ctx;(void)b;(void)e;(void)max;(void)buf; if(n)*n=0; return 0; }
 int  WINAPI WTDataPeek(HANDLE ctx, UINT b, UINT e, int max, LPVOID buf, LPINT n) { log_line("WTDataPeek"); (void)ctx;(void)b;(void)e;(void)max;(void)buf; if(n)*n=0; return 0; }
 BOOL WINAPI WTQueuePacketsEx(HANDLE ctx, UINT *o, UINT *n) { log_line("WTQueuePacketsEx"); (void)ctx; if(o)*o=0; if(n)*n=0; return FALSE; }
