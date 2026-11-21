@@ -534,3 +534,37 @@ Java 实现保留为 fallback（`System.loadLibrary` 失败时用），两条路
 逐字节一致（见上一节对比测试）。
 
 构建产物：`lib/arm64-v8a/libliquify.so`（12.7 KB），随 APK 一起签名安装。
+
+## 交互式液化：叠加窗 + 拖动笔刷（2026-11-22 01:45）
+
+`C:\wt_ui` 触发后（`wt_ui.txt` = `<mode> <radius> <strength>`）：
+
+```
+UI: 1600x1600 doc, paper 528x528 at 974,145, mode=forward radius=120 strength=0.80
+UI: down at doc 230,318
+UI: move doc 255,342 ... 848,936
+UI: up
+UI: committed 1600x1600 as a new layer
+```
+
+- 用一个 `WS_EX_LAYERED` 弹出窗精确盖住画纸（位置 = 画布子窗口客户区中心 ± 文档尺寸×缩放），
+  把文档像素按最近邻缩放进 32bpp DIB，`UpdateLayeredWindow` 显示；
+- 笔刷每步只 `lq_apply` + `lq_flush` 脏 tile，再把脏矩形重绘到叠加层——
+  120px 笔刷在 1600×1600 上每步只有几毫秒；
+- 提交：把当前文档图放剪贴板 → **先把焦点还给 SAI** → Ctrl+V → 新图层（图层3）。
+
+### 输入路径的坑
+
+- Winlator 的触摸转鼠标对 Wine 的**按键状态不可见**：`adb input swipe` 时
+  `GetAsyncKeyState(VK_LBUTTON)` 一直是 0（SAI 自己也不落笔，因为笔桥只在
+  压力>0 时才合成左键）。
+- 所以叠加层的笔刷改成**轮询全局光标 + 按键状态**（`GetCursorPos` +
+  `GetAsyncKeyState`），不依赖窗口消息；测试时用 `wt_mouse.txt` 注入
+  `mouse_event` 笔画驱动，实测 `UI: down/move/up` 正常。
+- 真机用笔时，PenBridge 会在压力>0 时合成 `ACTION_BUTTON_PRESS`，这条路径
+  会给 Wine 真正的按键状态——**待用笔实测**。
+- 提交/取消另外暴露 `wt_ui_done` / `wt_ui_cancel` 文件，方便无键盘测试
+  （回车/Esc 的 `GetAsyncKeyState` 在 adb keyevent 下同样看不到）。
+
+当前限制：叠加窗里没有工具栏（模式/半径靠 `wt_ui.txt`），没有 undo，
+每次提交都是新图层（非破坏性，可在 SAI 里手动合并/隐藏原层）。

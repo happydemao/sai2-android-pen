@@ -3031,6 +3031,294 @@ static void auto_flow(void) {
     ms_log("AUTO: done (pasted as a new layer)");
 }
 
+/* ---- interactive liquify overlay (C:\wt_ui) ---------------------------
+ * The prototype until now was "press a key, get a result". A usable plugin
+ * needs a brush: this creates a layered window exactly over the canvas paper,
+ * shows the document pixels in it, warps them under a drag with the same lq.c
+ * engine (only the dirty tiles are rebuilt, so a 100 px brush costs a few ms
+ * even under Box64), and commits with a right click (publish + Ctrl+V).
+ *
+ * C:\wt_ui.txt: "<mode> <radius> <strength>"
+ * Mouse: left drag = warp, right click = commit, Esc = cancel.
+ */
+typedef struct {
+    unsigned char *doc;
+    int dw, dh;
+    lq_ctx *ctx;
+    int mode, radius;
+    float strength;
+    int down;
+    float lastx, lasty;
+} UiState;
+
+static UiState g_ui;
+static HWND g_ui_hwnd;
+static HDC g_ui_dc;
+static HBITMAP g_ui_bmp;
+static unsigned char *g_ui_bits;
+static int g_ui_w, g_ui_h, g_ui_x, g_ui_y;
+
+static void ui_render_rect(int dx0, int dy0, int dx1, int dy1) {
+    if (!g_ui_bits || !g_ui.doc) return;
+    if (dx0 < 0) dx0 = 0;
+    if (dy0 < 0) dy0 = 0;
+    if (dx1 > g_ui.dw - 1) dx1 = g_ui.dw - 1;
+    if (dy1 > g_ui.dh - 1) dy1 = g_ui.dh - 1;
+    for (int oy = dy0 * g_ui_h / g_ui.dh; oy <= dy1 * g_ui_h / g_ui.dh; ++oy) {
+        if (oy < 0 || oy >= g_ui_h) continue;
+        int sy = oy * g_ui.dh / g_ui_h;
+        for (int ox = dx0 * g_ui_w / g_ui.dw; ox <= dx1 * g_ui_w / g_ui.dw; ++ox) {
+            if (ox < 0 || ox >= g_ui_w) continue;
+            int sx = ox * g_ui.dw / g_ui_w;
+            const unsigned char *src = g_ui.doc + ((size_t)sy * g_ui.dw + sx) * 4;
+            unsigned char *dst = g_ui_bits + ((size_t)oy * g_ui_w + ox) * 4;
+            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
+        }
+    }
+}
+
+static void ui_update_window(void) {
+    if (!g_ui_hwnd) return;
+    HDC screen = GetDC(NULL);
+    POINT pt = { g_ui_x, g_ui_y };
+    SIZE sz = { g_ui_w, g_ui_h };
+    POINT src = { 0, 0 };
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER;
+    bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = 255;
+    bf.AlphaFormat = AC_SRC_ALPHA;
+    UpdateLayeredWindow(g_ui_hwnd, screen, &pt, &sz, g_ui_dc, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(NULL, screen);
+}
+
+static void ui_commit(void) {
+    if (!g_ui.doc) return;
+    FILE *f = fopen("C:\\wt_paste.bin", "wb");
+    if (f) { fwrite(g_ui.doc, 1, (size_t)g_ui.dw * 4 * g_ui.dh, f); fclose(f); }
+    FILE *t = fopen("C:\\wt_paste.txt", "wb");
+    if (t) { fprintf(t, "%d %d", g_ui.dw, g_ui.dh); fclose(t); }
+    doc_paste();
+    /* the overlay owns the focus; hand it back to SAI or the Ctrl+V lands on
+     * the (about to be destroyed) overlay window */
+    if (g_hwnd) { SetForegroundWindow(g_hwnd); SetFocus(g_hwnd); }
+    Sleep(250);
+    send_ctrl_key('V');
+    ms_log("UI: committed %dx%d as a new layer", g_ui.dw, g_ui.dh);
+}
+
+static void ui_close(void) {
+    if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
+    if (g_ui.doc) { free(g_ui.doc); g_ui.doc = NULL; }
+    if (g_ui_bmp) { DeleteObject(g_ui_bmp); g_ui_bmp = NULL; }
+    if (g_ui_dc) { DeleteDC(g_ui_dc); g_ui_dc = NULL; }
+    if (g_ui_hwnd) { DestroyWindow(g_ui_hwnd); g_ui_hwnd = NULL; }
+}
+
+static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_LBUTTONDOWN: {
+        float dx = (float)LOWORD(l) * g_ui.dw / g_ui_w;
+        float dy = (float)HIWORD(l) * g_ui.dh / g_ui_h;
+        ms_log("UI: down at doc %.0f,%.0f", dx, dy);
+        SetCapture(h);
+        g_ui.down = 1;
+        g_ui.lastx = dx; g_ui.lasty = dy;
+        if (!g_ui.ctx) g_ui.ctx = lq_create(g_ui.doc, g_ui.dw, g_ui.dh, g_ui.dw * 4);
+        if (g_ui.ctx) lq_stroke_begin(g_ui.ctx, (int)dx, (int)dy, g_ui.radius);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!g_ui.down || !g_ui.ctx) return 0;
+        float dx = (float)LOWORD(l) * g_ui.dw / g_ui_w;
+        float dy = (float)HIWORD(l) * g_ui.dh / g_ui_h;
+        static int moves;
+        if ((moves++ % 10) == 0)
+            ms_log("UI: move doc %.0f,%.0f", dx, dy);
+        lq_apply(g_ui.ctx, (lq_mode)g_ui.mode, g_ui.lastx, g_ui.lasty, dx, dy,
+                 (float)g_ui.radius, g_ui.strength);
+        g_ui.lastx = dx; g_ui.lasty = dy;
+        int a[4];
+        lq_flush(g_ui.ctx, &a[0], &a[1], &a[2], &a[3]);
+        if (a[0] >= 0) {
+            ui_render_rect(a[0], a[1], a[2], a[3]);
+            ui_update_window();
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        ms_log("UI: up");
+        g_ui.down = 0;
+        ReleaseCapture();
+        return 0;
+    case WM_RBUTTONUP:
+        ui_commit();
+        ui_close();
+        return 0;
+    case WM_KEYDOWN:
+        if (w == VK_ESCAPE) { ui_close(); }
+        else if (w == VK_RETURN) { ui_commit(); ui_close(); }
+        return 0;
+    case WM_CLOSE:
+        ui_close();
+        return 0;
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static DWORD WINAPI ui_thread(LPVOID p) {
+    (void)p;
+    /* 1. capture the document through SAI's own clipboard copy */
+    if (OpenClipboard(NULL)) { EmptyClipboard(); CloseClipboard(); }
+    send_ctrl_key('A');
+    Sleep(120);
+    send_ctrl_key('C');
+    int got = 0;
+    for (int i = 0; i < 40; ++i) { Sleep(100); if (clipboard_has_dib()) { got = 1; break; } }
+    if (!got) { ms_log("UI: no CF_DIB from SAI"); return 0; }
+    clipboard_read();
+    send_ctrl_key('D');
+
+    int w = 0, h = 0, bpp = 0;
+    FILE *cf = fopen("C:\\wt_clipin.txt", "r");
+    if (cf) { if (fscanf(cf, "%d %d %d", &w, &h, &bpp) != 3) w = h = 0; fclose(cf); }
+    if (w <= 0 || h <= 0) { ms_log("UI: no document image"); return 0; }
+    g_ui.doc = (unsigned char*)malloc((size_t)w * 4 * h);
+    FILE *pf = fopen("C:\\wt_clipin.bin", "rb");
+    if (!g_ui.doc || !pf) { if (pf) fclose(pf); ui_close(); ms_log("UI: read failed"); return 0; }
+    size_t got2 = fread(g_ui.doc, 1, (size_t)w * 4 * h, pf);
+    fclose(pf);
+    if (got2 != (size_t)w * 4 * h) { ui_close(); return 0; }
+    g_ui.dw = w; g_ui.dh = h;
+
+    /* 2. mode/radius/strength */
+    g_ui.mode = 0; g_ui.radius = w / 8; g_ui.strength = 0.7f;
+    char mspec[32] = "forward";
+    cf = fopen("C:\\wt_ui.txt", "r");
+    if (cf) {
+        if (fscanf(cf, "%31s %d %f", mspec, &g_ui.radius, &g_ui.strength) < 1)
+            strcpy(mspec, "forward");
+        fclose(cf);
+    }
+    if (!strcmp(mspec, "bloat")) g_ui.mode = 1;
+    else if (!strcmp(mspec, "pinch")) g_ui.mode = 2;
+    else if (!strcmp(mspec, "twirl_cw")) g_ui.mode = 3;
+    else if (!strcmp(mspec, "twirl_ccw")) g_ui.mode = 4;
+    else if (!strcmp(mspec, "smooth")) g_ui.mode = 5;
+
+    /* 3. paper rect: centred in the canvas child at the current zoom */
+    RECT rc; GetClientRect(g_cv_dst, &rc);
+    POINT o = { 0, 0 }; ClientToScreen(g_cv_dst, &o);
+    char title[128] = ""; GetWindowTextA(g_cv_dst, title, (int)sizeof title - 1);
+    int zoom = 100;
+    const char *pc = strrchr(title, '(');
+    if (pc) zoom = atoi(pc + 1);
+    if (zoom <= 0 || zoom > 6400) zoom = 100;
+    g_ui_w = w * zoom / 100;
+    g_ui_h = h * zoom / 100;
+    if (g_ui_w < 32 || g_ui_h < 32) { ui_close(); ms_log("UI: bad paper %dx%d", g_ui_w, g_ui_h); return 0; }
+    g_ui_x = o.x + (rc.right - g_ui_w) / 2;
+    g_ui_y = o.y + (rc.bottom - g_ui_h) / 2;
+
+    /* 4. surface + window */
+    BITMAPINFO bi; memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = g_ui_w;
+    bi.bmiHeader.biHeight = -g_ui_h;             /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC screen = GetDC(NULL);
+    g_ui_dc = CreateCompatibleDC(screen);
+    ReleaseDC(NULL, screen);
+    g_ui_bmp = CreateDIBSection(g_ui_dc, &bi, DIB_RGB_COLORS, (void**)&g_ui_bits, NULL, 0);
+    if (!g_ui_bmp || !g_ui_bits) { ui_close(); ms_log("UI: create surface failed"); return 0; }
+    SelectObject(g_ui_dc, g_ui_bmp);
+    ui_render_rect(0, 0, w - 1, h - 1);
+
+    WNDCLASSEXA wc; memset(&wc, 0, sizeof wc);
+    wc.cbSize = sizeof wc;
+    wc.lpfnWndProc = ui_wndproc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "LiquifyOverlay";
+    RegisterClassExA(&wc);
+    g_ui_hwnd = CreateWindowExA(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                                "LiquifyOverlay", "liquify", WS_POPUP,
+                                g_ui_x, g_ui_y, g_ui_w, g_ui_h,
+                                NULL, NULL, wc.hInstance, NULL);
+    if (!g_ui_hwnd) { ui_close(); ms_log("UI: create window failed"); return 0; }
+    ui_update_window();
+    ShowWindow(g_ui_hwnd, SW_SHOW);
+    SetForegroundWindow(g_ui_hwnd);
+    SetFocus(g_ui_hwnd);
+    ms_log("UI: %dx%d doc, paper %dx%d at %d,%d, mode=%s radius=%d strength=%.2f",
+           w, h, g_ui_w, g_ui_h, g_ui_x, g_ui_y, mspec, g_ui.radius, g_ui.strength);
+
+    /* Winlator's touch path does not reliably deliver mouse messages to a
+     * Wine popup (the drag just never arrived), so drive the brush from the
+     * global cursor/button state instead. The window only renders. */
+    for (;;) {
+        MSG msg;
+        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (!g_ui_hwnd) break;
+
+        POINT p; GetCursorPos(&p);
+        int over = p.x >= g_ui_x && p.x < g_ui_x + g_ui_w &&
+                   p.y >= g_ui_y && p.y < g_ui_y + g_ui_h;
+        int down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        float dx = (float)(p.x - g_ui_x) * g_ui.dw / g_ui_w;
+        float dy = (float)(p.y - g_ui_y) * g_ui.dh / g_ui_h;
+
+        if (down && over) {
+            if (!g_ui.down) {
+                if (!g_ui.ctx)
+                    g_ui.ctx = lq_create(g_ui.doc, g_ui.dw, g_ui.dh, g_ui.dw * 4);
+                if (g_ui.ctx) lq_stroke_begin(g_ui.ctx, (int)dx, (int)dy, g_ui.radius);
+                g_ui.down = 1;
+                g_ui.lastx = dx; g_ui.lasty = dy;
+                ms_log("UI: down at doc %.0f,%.0f", dx, dy);
+            } else if (g_ui.ctx && (dx != g_ui.lastx || dy != g_ui.lasty)) {
+                lq_apply(g_ui.ctx, (lq_mode)g_ui.mode, g_ui.lastx, g_ui.lasty, dx, dy,
+                         (float)g_ui.radius, g_ui.strength);
+                g_ui.lastx = dx; g_ui.lasty = dy;
+                int a[4];
+                lq_flush(g_ui.ctx, &a[0], &a[1], &a[2], &a[3]);
+                if (a[0] >= 0) {
+                    ui_render_rect(a[0], a[1], a[2], a[3]);
+                    ui_update_window();
+                }
+            }
+        } else if (g_ui.down) {
+            g_ui.down = 0;
+            ms_log("UI: up at doc %.0f,%.0f", dx, dy);
+        }
+
+        {
+            static int hb;
+            if ((hb++ % 60) == 0)
+                ms_log("UI: cur %d,%d over=%d down=%d", (int)p.x, (int)p.y, over, down);
+        }
+        /* The Winlator input path does not surface the keyboard or mouse
+         * button state to Wine (GetAsyncKeyState stays 0), so the commit and
+         * cancel actions are also exposed as files for now. */
+        if (GetFileAttributesA("C:\\wt_ui_done") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_ui_done");
+            ui_commit(); ui_close(); break;
+        }
+        if (GetFileAttributesA("C:\\wt_ui_cancel") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_ui_cancel");
+            ui_close(); break;
+        }
+        if (GetAsyncKeyState(VK_RETURN) & 0x8000) { ui_commit(); ui_close(); break; }
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { ui_close(); break; }
+        Sleep(16);
+    }
+    return 0;
+}
+
 static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
@@ -3126,6 +3414,11 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
                 }
                 free(bf);
             }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_ui") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_ui");
+            CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
             continue;
         }
         if (GetFileAttributesA("C:\\wt_auto") != INVALID_FILE_ATTRIBUTES) {
