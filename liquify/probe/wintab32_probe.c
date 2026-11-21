@@ -83,6 +83,7 @@ typedef struct {
 #define MAX_PRESS_CEILING 8191
 static int g_max_press = 1023;
 static int g_last_press;                       /* last WinTab pressure (0..4095) */
+static volatile int g_eraser;                  /* pen's eraser end is down */
 static int g_ui_press_max;
 #define MAX_PRESS  g_max_press
 
@@ -575,6 +576,7 @@ static void emit_sample(const SAMPLE *s) {
     pk.status = 0;
     pk.cursor = 0;
     pk.buttons  = down ? 1 : 0;
+    pk.cursor   = g_eraser ? 2 : 1;
     pk.pressure = down ? (UINT)s->press : 0;
     g_last_press = down ? (int)pk.pressure : 0;
     if (g_last_press > g_ui_press_max) g_ui_press_max = g_last_press;
@@ -1395,6 +1397,12 @@ static DWORD WINAPI producer(LPVOID arg) {
             if (wtc_parse_control(buf, &ctl)) {
                 /* not a pen sample: the app asking for a zoom or a wake */
                 if (ctl.kind == WTC_CTL_ZOOM) zoom_datagram(ctl.zoom);
+                else if (ctl.kind == WTC_CTL_ERASER) {
+                    if (g_eraser != ctl.eraser) {
+                        g_eraser = ctl.eraser;
+                        log_line("ERASER %d", ctl.eraser);
+                    }
+                }
                 else                          wake_datagram(ctl.wake);
             } else if (wtc_parse_datagram(buf, &dg)) {
                 long sq = dg.seq; int p = dg.p, x = dg.x, y = dg.y, w = dg.w, h = dg.h;
@@ -1545,7 +1553,7 @@ UINT WINAPI wt_info_sai_w(UINT cat, UINT idx, LPVOID out) {
         case 2: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }   /* SPECVERSION 1.1 */
         case 3: { WORD v=(0)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
         case 4: case 6: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }    /* NDEVICES/NCONTEXTS */
-        case 5: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }            /* NCURSORS */
+        case 5: { UINT n=2; if(out)*(UINT*)out=n; return sizeof(UINT); }            /* NCURSORS */
         default: return 0;
         }
     case WTI_DEFCONTEXT: case WTI_DDCTXS:
@@ -1555,12 +1563,18 @@ UINT WINAPI wt_info_sai_w(UINT cat, UINT idx, LPVOID out) {
         switch (idx) {
         case 15: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); } /* NPRESSURE */
         case 17: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); } /* ORIENTATION */
+        case 23: { UINT n=2; if(out)*(UINT*)out=n; return sizeof(UINT); }           /* NCSRTYPES */
+        case 24: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }           /* FIRSTCSR */
         case 1: { static const WCHAR n[]=L"Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
         default: return 0;
         }
-    case WTI_CURSORS:
+    case WTI_CURSORS + 0: case WTI_CURSORS + 1:
         switch (idx) {
-        case 1: { static const WCHAR n[]=L"Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case 1: { static const WCHAR pen[]=L"Pen", er[]=L"Eraser";
+                  const WCHAR *n = (cat == WTI_CURSORS + 1) ? er : pen;
+                  if(out)memcpy(out,n,(cat == WTI_CURSORS + 1 ? sizeof(er) : sizeof(pen)));
+                  return (cat == WTI_CURSORS + 1) ? (UINT)sizeof(er) : (UINT)sizeof(pen); }
+        case 15: { UINT n = (cat == WTI_CURSORS + 1) ? 0 : 1; if(out)*(UINT*)out=n; return sizeof(UINT); } /* CSR_TYPE */
         case 8: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
         default: { UINT z=0; if(out)*(UINT*)out=z; return sizeof(UINT); }
         }
@@ -1611,12 +1625,17 @@ UINT WINAPI wt_info_sai_a(UINT cat, UINT idx, LPVOID out) {
         switch (idx) {
         case 15: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
         case 17: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); }
+        case 23: { UINT n=2; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case 24: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }
         case 1: { static const char n[]="Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
         default: return 0;
         }
-    case WTI_CURSORS:
+    case WTI_CURSORS + 0: case WTI_CURSORS + 1:
         switch (idx) {
-        case 1: { static const char n[]="Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case 1: { static const char pen[]="Pen", er[]="Eraser";
+                  if (cat == WTI_CURSORS + 1) { if(out)memcpy(out,er,sizeof(er)); return sizeof(er); }
+                  if(out)memcpy(out,pen,sizeof(pen)); return sizeof(pen); }
+        case 15: { UINT n = (cat == WTI_CURSORS + 1) ? 0 : 1; if(out)*(UINT*)out=n; return sizeof(UINT); }
         case 8: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
         default: { UINT z=0; if(out)*(UINT*)out=z; return sizeof(UINT); }
         }
@@ -3529,6 +3548,15 @@ static DWORD WINAPI ui_watcher_thread(LPVOID p) {
     (void)p;
     for (;;) {
         Sleep(250);
+        /* test hook: force the eraser cursor without eraser hardware */
+        if (GetFileAttributesA("C:\\wt_eraser") != INVALID_FILE_ATTRIBUTES) {
+            FILE *ef = fopen("C:\\wt_eraser", "r");
+            int v = 0;
+            if (ef) { if (fscanf(ef, "%d", &v) != 1) v = 0; fclose(ef); }
+            DeleteFileA("C:\\wt_eraser");
+            g_eraser = v ? 1 : 0;
+            ms_log("ERASER forced %d", g_eraser);
+        }
         if (!g_ui_hwnd && !g_ui_starting &&
             GetFileAttributesA("C:\\wt_ui") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_ui");

@@ -83,6 +83,8 @@ public final class PenBridge {
     private static int lastQueuedX = -100000, lastQueuedY = -100000;
 
     private static int seq = 1;
+    /** eraser end state last sent to the DLL (only on change) */
+    private static boolean eraserSent;
     private static int sentCount;
     private static int lastAction = -1;
     private static float lastPressure = -1f;
@@ -417,6 +419,13 @@ B64_32_2
             }
 
             // ---------------- 以下全部是笔的原有逻辑 ----------------
+            // 橡皮端：告诉 DLL 把 packet 的 cursor 换成 cursor 2（SAI 靠这个切橡皮）
+            final boolean eraser = ev.getToolType(pi) == MotionEvent.TOOL_TYPE_ERASER;
+            if (eraser != eraserSent) {
+                eraserSent = eraser;
+                sendControl(eraser ? "E 1" : "E 0");
+                note("eraser=" + eraser);
+            }
             if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE
                     || action == MotionEvent.ACTION_POINTER_DOWN || pressure > 0f) {
                 lastPenTouchMs = SystemClock.uptimeMillis();
@@ -1904,6 +1913,16 @@ B64_32_2
             }
             send(x, y, p);
             lastSendMs = SystemClock.uptimeMillis();
+        }
+    }
+
+    private static void sendControl(String msg) {
+        try {
+            if (disabled || socket == null) return;
+            byte[] data = msg.getBytes(StandardCharsets.US_ASCII);
+            socket.send(new DatagramPacket(data, data.length, loopback, PORT));
+        } catch (Throwable t) {
+            /* a lost control line only means the eraser state lags */
         }
     }
 

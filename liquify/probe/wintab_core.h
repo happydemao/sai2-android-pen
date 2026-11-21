@@ -445,8 +445,9 @@ static int wtc_wake_requested(const char *marker, char *last, size_t cap, int ho
  * simply ignores these lines and keeps reading the files. */
 #define WTC_CTL_ZOOM 1
 #define WTC_CTL_WAKE 2
+#define WTC_CTL_ERASER 3
 #define WTC_ZOOM_MAX_STEPS 64        /* per datagram; anything larger is not a pinch */
-typedef struct { int kind; int zoom; char wake[32]; } WTC_CONTROL;
+typedef struct { int kind; int zoom; char wake[32]; int eraser; } WTC_CONTROL;
 
 static int wtc_ctl_only_space(const char *p) {
     while (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t') p++;
@@ -471,6 +472,17 @@ static int wtc_parse_control(const char *buf, WTC_CONTROL *c) {
         if (v == 0 || v > WTC_ZOOM_MAX_STEPS) return 0;
         c->kind = WTC_CTL_ZOOM;
         c->zoom = neg ? -(int)v : (int)v;
+        return 1;
+    }
+    if (buf[0] == 'E') {
+        /* eraser state of the pen: "E 1" = the eraser end is down */
+        const char *p = buf + 2;
+        if (*p != '0' && *p != '1') return 0;
+        int v = *p - '0';
+        p++;
+        if (!wtc_ctl_only_space(p)) return 0;
+        c->kind = WTC_CTL_ERASER;
+        c->eraser = v;
         return 1;
     }
     if (buf[0] == 'K') {
