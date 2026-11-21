@@ -171,9 +171,48 @@ static int wt_build_packet(const OURPKT *pk, UINT serial, WTPKT mask, void *buf)
 /* WinTab categories */
 #define WTI_INTERFACE 1
 #define WTI_DEFCONTEXT 3
+#define WTI_DEFSYSCTX 4
 #define WTI_DEVICES 100
 #define WTI_CURSORS 200
 #define WTI_DDCTXS 400
+
+/* device info indices */
+#define DVC_NAME 1
+#define DVC_VERSION 2
+#define DVC_X 3
+#define DVC_Y 4
+#define DVC_Z 5
+#define DVC_NPRESSURE 15
+#define DVC_TPRESSURE 16
+#define DVC_ORIENTATION 17
+#define DVC_ROTATION 18
+#define DVC_PKTRATE 19
+#define DVC_PKTDATA 20
+#define DVC_PKTMODE 21
+#define DVC_HARDWARE 22
+#define DVC_NCSRTYPES 23
+#define DVC_FIRSTCSR 24
+#define DVC_DEFX 25
+#define DVC_DEFY 26
+#define DVC_DEFZ 27
+
+/* cursor info indices */
+#define CSR_NAME 1
+#define CSR_ACTIVE 2
+#define CSR_PKTDATA 3
+#define CSR_BUTTONS 4
+#define CSR_BUTTONBITS 5
+#define CSR_BTNNAMES 6
+#define CSR_BUTTONMAP 7
+#define CSR_SYSBTNMAP 8
+#define CSR_NPBUTTON 9
+#define CSR_TPBUTTON 10
+#define CSR_NPBTNMARKS 11
+#define CSR_NPBREPEAT 12
+#define CSR_NPBTNACTION 13
+#define CSR_PHYSID 14
+#define CSR_TYPE 15
+#define CSR_CAPABILITIES 16
 
 static HWND  g_hwnd;
 static UINT  g_serial = 1;
@@ -1468,26 +1507,47 @@ UINT WINAPI WTInfoW(UINT cat, UINT idx, LPVOID out) {
     case WTI_INTERFACE:
         switch (idx) {
         case 1: { static const WCHAR id[]=L"Wine OwnTab 1.1"; if(out) memcpy(out,id,sizeof(id)); return sizeof(id); }
-        case 2: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }   /* SPECVERSION 1.1 */
-        case 3: { WORD v=(0)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
-        case 4: case 6: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }    /* NDEVICES/NCONTEXTS */
-        case 5: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }            /* NCURSORS */
+        case 2: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
+        case 3: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
+        case 4: case 5: case 6: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case 7: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }  /* CTXOPTIONS */
+        case 8: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }  /* CTXSAVESIZE */
+        case 9: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }  /* NEXTENSIONS */
+        case 10:{ UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }  /* NEXTSIZE */
         default: return 0;
         }
-    case WTI_DEFCONTEXT: case WTI_DDCTXS:
+    case WTI_DEFCONTEXT: case WTI_DEFSYSCTX: case WTI_DDCTXS:
         if (idx==0) { if(out) fill_default_context((LOGCONTEXTW*)out); return sizeof(LOGCONTEXTW); }
         return 0;
     case WTI_DEVICES:
         switch (idx) {
-        case 15: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); } /* NPRESSURE */
-        case 17: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); } /* ORIENTATION */
-        case 1: { static const WCHAR n[]=L"Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case DVC_NAME: { static const WCHAR n[]=L"Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case DVC_X: case DVC_Y: case DVC_Z: { AXIS a={0,IN_EXT,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
+        case DVC_NPRESSURE: case DVC_TPRESSURE: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
+        case DVC_ORIENTATION: case DVC_ROTATION: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); }
+        case DVC_PKTRATE: { UINT n=133; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case DVC_PKTDATA: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case DVC_PKTMODE: { WTPKT m=0; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case DVC_HARDWARE: { DWORD n=0; if(out)*(DWORD*)out=n; return sizeof(DWORD); }
+        case DVC_NCSRTYPES: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case DVC_FIRSTCSR: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case DVC_DEFX: case DVC_DEFY: case DVC_DEFZ: { LONG n=0; if(out)*(LONG*)out=n; return sizeof(LONG); }
         default: return 0;
         }
     case WTI_CURSORS:
         switch (idx) {
-        case 1: { static const WCHAR n[]=L"Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
-        case 8: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case CSR_NAME: { static const WCHAR n[]=L"Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case CSR_ACTIVE: { BOOL b=TRUE; if(out)*(BOOL*)out=b; return sizeof(BOOL); }
+        case CSR_PKTDATA: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case CSR_BUTTONS: { UINT n=3; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_BUTTONBITS: { UINT n=3; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_BTNNAMES: { static const WCHAR n[]=L"Left\0Middle\0Right\0"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case CSR_BUTTONMAP: { BYTE m[3]={0,1,2}; if(out)memcpy(out,m,sizeof(m)); return sizeof(m); }
+        case CSR_SYSBTNMAP: { BYTE m[3]={0,1,2}; if(out)memcpy(out,m,sizeof(m)); return sizeof(m); }
+        case CSR_NPBUTTON: { UINT n=3; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_TPBUTTON: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_NPBTNMARKS: case CSR_NPBREPEAT: case CSR_NPBTNACTION: { UINT n[3]={0,0,0}; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case CSR_PHYSID: case CSR_TYPE: case CSR_CAPABILITIES: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
         default: { UINT z=0; if(out)*(UINT*)out=z; return sizeof(UINT); }
         }
     default: return 0;
@@ -1546,7 +1606,7 @@ int WINAPI WTPacket(HANDLE ctx, UINT serial, LPVOID buf) {
     WTPKT mask;
     EnterCriticalSection(&g_cs);
     pk = (g_ring_serial[serial % RING_SZ] == serial) ? g_ring[serial % RING_SZ] : g_last;
-    mask = g_have_ctx ? g_ctx.lcPktData : OUR_PKTDATA;
+    mask = g_app_pktdata ? g_app_pktdata : OUR_PKTDATA;
     if (g_trace_start) wtc_st_fetch(&g_st, GetTickCount(), serial);
     LeaveCriticalSection(&g_cs);
     wt_build_packet(&pk, serial, mask, buf);   /* layout follows lcPktData */
@@ -1655,24 +1715,43 @@ UINT WINAPI WTInfoA(UINT cat, UINT idx, LPVOID out) {
         switch (idx) {
         case 1: { static const char id[]="Wine OwnTab 1.1"; if(out) memcpy(out,id,sizeof(id)); return sizeof(id); }
         case 2: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
-        case 3: { WORD v=(0)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
+        case 3: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
         case 4: case 5: case 6: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case 7: case 8: case 9: case 10: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
         default: return 0;
         }
-    case WTI_DEFCONTEXT: case WTI_DDCTXS:
+    case WTI_DEFCONTEXT: case WTI_DEFSYSCTX: case WTI_DDCTXS:
         if (idx==0) { if(out) fill_default_context_a((LOGCONTEXTA*)out); return sizeof(LOGCONTEXTA); }
         return 0;
     case WTI_DEVICES:
         switch (idx) {
-        case 15: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
-        case 17: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); }
-        case 1: { static const char n[]="Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case DVC_NAME: { static const char n[]="Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case DVC_X: case DVC_Y: case DVC_Z: { AXIS a={0,IN_EXT,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
+        case DVC_NPRESSURE: case DVC_TPRESSURE: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
+        case DVC_ORIENTATION: case DVC_ROTATION: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); }
+        case DVC_PKTRATE: { UINT n=133; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case DVC_PKTDATA: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case DVC_PKTMODE: { WTPKT m=0; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case DVC_HARDWARE: { DWORD n=0; if(out)*(DWORD*)out=n; return sizeof(DWORD); }
+        case DVC_NCSRTYPES: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case DVC_FIRSTCSR: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case DVC_DEFX: case DVC_DEFY: case DVC_DEFZ: { LONG n=0; if(out)*(LONG*)out=n; return sizeof(LONG); }
         default: return 0;
         }
     case WTI_CURSORS:
         switch (idx) {
-        case 1: { static const char n[]="Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
-        case 8: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case CSR_NAME: { static const char n[]="Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case CSR_ACTIVE: { BOOL b=TRUE; if(out)*(BOOL*)out=b; return sizeof(BOOL); }
+        case CSR_PKTDATA: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        case CSR_BUTTONS: { UINT n=3; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_BUTTONBITS: { UINT n=3; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_BTNNAMES: { static const char n[]="Left\0Middle\0Right\0"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case CSR_BUTTONMAP: { BYTE m[3]={0,1,2}; if(out)memcpy(out,m,sizeof(m)); return sizeof(m); }
+        case CSR_SYSBTNMAP: { BYTE m[3]={0,1,2}; if(out)memcpy(out,m,sizeof(m)); return sizeof(m); }
+        case CSR_NPBUTTON: { UINT n=3; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_TPBUTTON: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        case CSR_NPBTNMARKS: case CSR_NPBREPEAT: case CSR_NPBTNACTION: { UINT n[3]={0,0,0}; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case CSR_PHYSID: case CSR_TYPE: case CSR_CAPABILITIES: { UINT n=0; if(out)*(UINT*)out=n; return sizeof(UINT); }
         default: { UINT z=0; if(out)*(UINT*)out=z; return sizeof(UINT); }
         }
     default: return 0;

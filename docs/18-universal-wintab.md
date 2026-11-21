@@ -58,8 +58,8 @@ i686-w64-mingw32-gcc -shared -O2 -o wintab32-32.dll wintab32.c wintab32.def \
 
 ## 验证状态
 
-- FireAlpaca 64 位：`WTOpenW` 请求 `0x1fe0`，`WTPacketsGet` 返回
-  `size=40` 的报文，`fetched` 持续增长；
+- **Krita 5.3.4.1（64 位）**：`WTPacketsGet` 返回 `size=44` 的报文，
+  Krita 自带的「数位板测试工具」显示 `S=0.70 -> 0.21`，测试笔画粗细随之变化；
+- FireAlpaca 64 位：请求 `0x1fe0`，`WTPacketsGet` 返回 `size=40`，`fetched` 持续增长；
 - SAI：仍使用 `0x15e2`/`WTPacket` 路径；
-- 实际笔压效果需要在 FireAlpaca 里用真实笔再确认（本机用
-  `sec_e-pen` 模拟样本做了取包验证）。
+- 32 位 DLL 已内嵌到 `syswow64`，同一份源码编译，等待 32 位应用实测。
