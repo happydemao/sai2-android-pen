@@ -10,35 +10,41 @@ set -eu
 ROOT=/Users/happydemao/Documents/deepseek-harness/default-workspace
 export HOME=$ROOT/.adb-home
 ADB=$ROOT/android-platform-tools/adb
-P=/data/data/lator.forsai/files/rootfs/home/xuser-2/.wine/drive_c
-PKG=lator.forsai
+SERIAL=${SERIAL:-}
+PKG=${PKG:-lator.forsai}
+USERDIR=${USERDIR:-xuser}
+P=${P:-/data/data/$PKG/files/rootfs/home/$USERDIR/.wine/drive_c}
+A() { "$ADB" ${SERIAL:+-s "$SERIAL"} "$@"; }
+SH() { A shell "run-as $PKG sh -c '$*'"; }
 
-$ADB shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1
+
+A shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1
 sleep 6
 
-W=$($ADB exec-out screencap -p > /tmp/ls_shot.png; python3 - <<'EOF'
+W=$(A exec-out screencap -p > /tmp/ls_shot.png; python3 - <<'EOF'
 import struct
 d=open('/tmp/ls_shot.png','rb').read()
 w,h=struct.unpack('>II', d[16:24])
 print(w)
 EOF
 )
-if [ "$W" = "2560" ]; then
-    X=148; Y=522        # landscape: play button of the only shortcut card
-else
-    X=231; Y=549        # portrait
-fi
+case "$W" in
+  2560) X=148; Y=522 ;;   # tablet 2560x1600 landscape
+  2400) X=291; Y=638 ;;   # phone 2400x1080 landscape
+  1600) X=231; Y=549 ;;   # portrait fallback
+  *)    X=290; Y=640 ;;
+esac
 echo "screen width $W -> tap $X,$Y"
-$ADB shell input tap "$X" "$Y"
+A shell input tap "$X" "$Y"
 
 for i in $(seq 1 40); do
     sleep 2
-    AGE=$($ADB shell "run-as $PKG sh -c 'echo \$(( \$(date +%s) - \$(stat -c %Y $P/wt_status.txt 2>/dev/null || echo 0) ))'" | tr -d '\r')
+    AGE=$(A shell "run-as $PKG sh -c 'echo \$(( \$(date +%s) - \$(stat -c %Y $P/wt_status.txt 2>/dev/null || echo 0) ))'" | tr -d '\r')
     if [ "${AGE:-999}" -lt 5 ] 2>/dev/null; then
         echo "SAI up (status ${AGE}s old)"
         exit 0
     fi
 done
 echo "SAI did not come up" >&2
-$ADB exec-out screencap -p > /private/tmp/launch_failed.png
+A exec-out screencap -p > /private/tmp/launch_failed.png
 exit 1

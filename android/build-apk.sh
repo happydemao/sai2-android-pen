@@ -25,6 +25,7 @@ KEYSTORE=$ROOT/keys/debug.keystore
 WORK=/private/tmp/liquify-apk
 mkdir -p /private/tmp/apkhome
 
+DEVICE=${DEVICE:-}
 BASE=${1:-}
 if [ -z "$BASE" ] && [ -f "$REPO/Winlator-for-sai-0.3.30-lator.forsai.apk" ]; then
     # Always start from a clean release build: decoding an APK that already
@@ -34,8 +35,9 @@ if [ -z "$BASE" ] && [ -f "$REPO/Winlator-for-sai-0.3.30-lator.forsai.apk" ]; th
 fi
 if [ -z "$BASE" ]; then
     ADB=$ROOT/android-platform-tools/adb
-    ADB_APK=$(env HOME="$ROOT/.adb-home" "$ADB" shell pm path lator.forsai | sed 's/package://' | tr -d '\r')
-    env HOME="$ROOT/.adb-home" "$ADB" exec-out "cat '$ADB_APK'" > "$WORK-base.apk"
+    PKG=${PKG:-lator.forsai}
+    ADB_APK=$(env HOME="$ROOT/.adb-home" "$ADB" ${DEVICE:+-s "$DEVICE"} shell pm path $PKG | sed 's/package://' | tr -d '\r')
+    env HOME="$ROOT/.adb-home" "$ADB" ${DEVICE:+-s "$DEVICE"} exec-out "cat '$ADB_APK'" > "$WORK-base.apk"
     BASE=$WORK-base.apk
 fi
 
@@ -97,12 +99,13 @@ print(f"added classes{n + 1}.dex (existing dex files: {[x for x in names if x.en
 PY
 
 echo "== align + sign"
-"$BT/zipalign" -f -p 4 "$WORK/withdex.apk" "$WORK/aligned.apk"
+"$BT/zipalign" -f -p 4 -P 16 "$WORK/withdex.apk" "$WORK/aligned.apk"
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android \
     --ks-key-alias androiddebugkey --out "$WORK/signed.apk" "$WORK/aligned.apk" 2>/dev/null
 "$BT/apksigner" verify --print-certs "$WORK/signed.apk" | head -2
 
 echo "== install"
 ADB=$ROOT/android-platform-tools/adb
-env HOME="$ROOT/.adb-home" "$ADB" install -r "$WORK/signed.apk" | tail -2
+env HOME="$ROOT/.adb-home" "$ADB" ${DEVICE:+-s "$DEVICE"} push "$WORK/signed.apk" /data/local/tmp/liquify-patched.apk >/dev/null
+env HOME="$ROOT/.adb-home" "$ADB" ${DEVICE:+-s "$DEVICE"} shell "pm install -r -t /data/local/tmp/liquify-patched.apk" | tail -2
 echo "done: $WORK/signed.apk"

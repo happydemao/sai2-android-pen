@@ -415,3 +415,38 @@ Java 里（`android/LiquifyWarp.java`，和 `liquify/engine/lq.c` 同一套模�
    但第一次 1600×1600 仍然慢，需要把「读图/分配/变形」分段计时。
 2. **交互与实时预览**：现在是「一次性算完 → 粘贴」，没有笔刷拖动和叠加窗预览。
 3. **多图层/文件夹/选区/蒙版**：读的仍是拼合结果，提交成新图层。
+
+## 跨实现逐像素等价性（2026-11-22 01:15）
+
+`liquify/engine/lq_dump.c`（C 参考）与 `android/LiquifyCompare.java`（Java 移植）
+用**同一张输入图 + 同一组笔迹参数**各跑一遍，Python 逐像素对比 256×256 输出：
+
+| 模式 | 差异像素 | max\|Δ\| |
+|---|---|---|
+| forward | **0** | 0 |
+| bloat | **0** | 0 |
+| pinch | **0** | 0 |
+| twirl_cw | **0** | 0 |
+| twirl_ccw | **0** | 0 |
+| smooth | **0** | 0 |
+
+做到零差异踩过的四个点（都已修）：
+
+1. **smooth 算法不同**：C 是「每步按 falloff 半径做盒式模糊，再按权重和原像素混合」，
+   Java 一开始只在整个包围盒上做了一次固定半径模糊 → 重写成逐步混合。
+2. **位移场量化**：C 存 `int16`（1/16 px），Java 用 float 累加 → 按 1/16 量化。
+3. **累加精度**：C 用 `double` 累加 + `lrint`（就近取偶），Java 用 float 会差 1/16 px；
+   改成 double + `Math.rint` 后 forward 的 73 个边缘像素差异归零。
+4. **步进增量**：Java 必须像 C 一样用「本次位置 - (位置 - 步长)」求 mdx/mdy。
+
+复现：
+
+```bash
+cc -O2 -std=c99 -o /tmp/lq_dump liquify/engine/lq.c liquify/engine/lq_dump.c -lm
+/tmp/lq_dump /private/tmp/lqref
+javac -d /tmp/ltest android/LiquifyWarp.java android/LiquifyCompare.java
+java -cp /tmp/ltest com.winlator.sai.LiquifyCompare /private/tmp/lqjava
+# 然后逐字节比较两目录下同名 .bin
+```
+
+结论：Android 端不是「差不多的重写」，而是**与 DLL/参考引擎逐字节一致的移植**。

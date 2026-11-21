@@ -74,6 +74,9 @@ public final class LiquifyWarp {
         int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
         if (bw <= 0 || bh <= 0) return img;
 
+        if (mode == SMOOTH) return warpSmooth(img, w, h, bx0, bx1, by0, by1,
+                x0, y0, x1, y1, radius, strength, steps);
+
         byte[] snap = img.clone();
         float[] dx = new float[bw * bh];
         float[] dy = new float[bw * bh];
@@ -92,8 +95,13 @@ public final class LiquifyWarp {
             float t = (float) s / steps;
             float px = x0 + (x1 - x0) * t;
             float py = y0 + (y1 - y0) * t;
-            float mdx = (x1 - x0) / steps;
-            float mdy = (y1 - y0) / steps;
+            /* Mirror lq.c's arithmetic exactly: it receives x0 = px - step and
+             * derives the delta by subtraction, which matters because the field
+             * is quantised to 1/16 px. */
+            float x0arg = px - (x1 - x0) / steps;
+            float y0arg = py - (y1 - y0) / steps;
+            float mdx = px - x0arg;
+            float mdy = py - y0arg;
             int ix0 = clamp((int) Math.floor(px - radius - 1), bx0, bx1);
             int ix1 = clamp((int) Math.ceil(px + radius + 1), bx0, bx1);
             int iy0 = clamp((int) Math.floor(py - radius - 1), by0, by1);
@@ -130,25 +138,45 @@ public final class LiquifyWarp {
                     int bi = (int) (d2 * B);
                     float ox, oy;
                     if (mode == FORWARD) {
-                        float wgt = tabW[bi];
+                        /* Reproduce lq.c's falloff arithmetic (sqrt then d*d)
+                         * so the 1/16 px field quantisation is identical. */
+                        float dl = (float) Math.sqrt(ddx * ddx + ddy * ddy) * (1.0f / radius);
+                        float t1 = 1.0f - dl * dl;
+                        float wgt = t1 * t1 * strength;
                         if (wgt <= 0.0001f) continue;
                         ox = -mdx * wgt;
                         oy = -mdy * wgt;
                     } else if (mode == BLOAT || mode == PINCH) {
-                        float sc = tabScale[bi];
-                        if (sc == 0f) continue;
-                        ox = ddx * sc;
-                        oy = ddy * sc;
+                        float t1 = 1.0f - d2;
+                        float wgt = t1 * t1 * strength;
+                        if (wgt <= 0.0001f) continue;
+                        float len = (float) Math.sqrt(ddx * ddx + ddy * ddy);
+                        if (len < 0.001f) continue;
+                        float k = radius * 0.06f * wgt * (mode == BLOAT ? -1.0f : 1.0f);
+                        ox = ddx / len * k;
+                        oy = ddy / len * k;
                     } else if (mode == TWIRL_CW || mode == TWIRL_CCW) {
-                        float cs = tabCos[bi], sn = tabSin[bi];
+                        /* angle depends continuously on the weight; a table over
+                         * d^2 keeps sin/cos out of the inner loop (error ~1e-3 rad) */
+                        /* linear interpolation between buckets removes the
+                         * remaining visible difference vs lq.c */
+                        float fidx = d2 * B;
+                        int i0 = (int) fidx;
+                        if (i0 >= B) i0 = B - 1;
+                        float fr = fidx - i0;
+                        float cs = tabCos[i0] + (tabCos[i0 + 1] - tabCos[i0]) * fr;
+                        float sn = tabSin[i0] + (tabSin[i0 + 1] - tabSin[i0]) * fr;
                         ox = ddx * cs - ddy * sn - ddx;
                         oy = ddx * sn + ddy * cs - ddy;
                     } else {
                         continue;
                     }
                     int o = row + (x - bx0);
-                    dx[o] += ox;
-                    dy[o] += oy;
+                    /* lq.c stores the field as int16 in 1/16 px and accumulates
+                     * in double with lrint (round half to even); do it in double
+                     * too, otherwise a handful of edge pixels quantise apart. */
+                    dx[o] = (float) (Math.rint(((double) dx[o] + ox) * 16.0) / 16.0);
+                    dy[o] = (float) (Math.rint(((double) dy[o] + oy) * 16.0) / 16.0);
                 }
             }
         }
@@ -165,10 +193,54 @@ public final class LiquifyWarp {
             }
         }
 
-        if (mode == SMOOTH) {
-            /* 平滑是破坏性的（没有位移可表达），直接在结果上做盒式模糊 */
-            int rad = (int) (3.0f * strength) + 1;
-            smoothBox(img, w, h, bx0, bx1, by0, by1, rad);
+        return img;
+    }
+
+    /** Exact port of lq.c's LQ_SMOOTH: per brush step, a box blur whose
+     *  radius and blend weight follow the falloff, applied in place. */
+    private static byte[] warpSmooth(byte[] img, int w, int h,
+                                     int bx0, int bx1, int by0, int by1,
+                                     float x0, float y0, float x1, float y1,
+                                     float radius, float strength, int steps) {
+        final int B = LUT_N;
+        float invR2 = 1.0f / (radius * radius);
+        for (int s = 1; s <= steps; ++s) {
+            float t = (float) s / steps;
+            float px = x0 + (x1 - x0) * t;
+            float py = y0 + (y1 - y0) * t;
+            int ix0 = clamp((int) Math.floor(px - radius - 1), bx0, bx1);
+            int ix1 = clamp((int) Math.ceil(px + radius + 1), bx0, bx1);
+            int iy0 = clamp((int) Math.floor(py - radius - 1), by0, by1);
+            int iy1 = clamp((int) Math.ceil(py + radius + 1), by0, by1);
+            for (int y = iy0; y <= iy1; ++y) {
+                for (int x = ix0; x <= ix1; ++x) {
+                    float ddx = x - px, ddy = y - py;
+                    float d2 = (ddx * ddx + ddy * ddy) * invR2;
+                    if (d2 >= 1.0f) continue;
+                    float t1 = 1.0f - d2;
+                    float wgt = t1 * t1 * strength;
+                    if (wgt <= 0.0001f) continue;
+                    int rad = (int) (3.0f * wgt) + 1;
+                    int a0 = 0, a1 = 0, a2 = 0, a3 = 0, n = 0;
+                    for (int sy = y - rad; sy <= y + rad; sy += 2) {
+                        if (sy < 0 || sy >= h) continue;
+                        int base = sy * w * 4;
+                        for (int sx = x - rad; sx <= x + rad; sx += 2) {
+                            if (sx < 0 || sx >= w) continue;
+                            int o = base + sx * 4;
+                            a0 += img[o] & 0xFF; a1 += img[o + 1] & 0xFF;
+                            a2 += img[o + 2] & 0xFF; a3 += img[o + 3] & 0xFF;
+                            ++n;
+                        }
+                    }
+                    if (n == 0) continue;
+                    int o = (y * w + x) * 4;
+                    img[o]     = (byte) ((a0 / n) * wgt + (img[o] & 0xFF) * (1f - wgt) + 0.5f);
+                    img[o + 1] = (byte) ((a1 / n) * wgt + (img[o + 1] & 0xFF) * (1f - wgt) + 0.5f);
+                    img[o + 2] = (byte) ((a2 / n) * wgt + (img[o + 2] & 0xFF) * (1f - wgt) + 0.5f);
+                    img[o + 3] = (byte) ((a3 / n) * wgt + (img[o + 3] & 0xFF) * (1f - wgt) + 0.5f);
+                }
+            }
         }
         return img;
     }
