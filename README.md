@@ -105,7 +105,7 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | 应用名 / 图标 | ✅ 0.3.9，`Winlator for sai` + 新图标，见 [17](./docs/17-branding.md) |
 | 虚拟鼠标按钮光标 | ✅ 0.3.9，按下时先把光标移到手指位置再点击，见 [13](./docs/13-pen-cursor-follow.md) |
 | 关闭抖动修正后的直线 | 🔧 0.3.10 改用 8 倍定点坐标，待真机确认，见 [03](./docs/03-wintab-dll-protocol.md) |
-| 通用 WinTab 压感 | ✅ 0.3.13 Krita 5.3.4.1 数位板测试器 S 值随压力变化；支持 FireAlpaca/Krita 的 WTPacketsGet，见 [18](./docs/18-universal-wintab.md) |
+| 通用 WinTab 压感 | 🔧 0.3.15 补齐 WTInfo/packet mask，FireAlpaca 可取包；Krita 仍只收到 Mouse 事件，待排查，见 [18](./docs/18-universal-wintab.md) |
 | 手指操作 UI | ⚠️ 可用，双击仍偏难 |
 | 倾斜 / 橡皮 | ⏸ 未做（evdev 有数据，协议无字段，需重编 DLL） |
 | SAI 首笔弹 `FileError(161)` | ⚠️ SAI×Wine 兼容问题，非致命，不影响作画与撤销 |

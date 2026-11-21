@@ -1585,7 +1585,11 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
          * conflation to those: they wait for packets and would never start. */
         g_polling = (g_app_pktdata != OUR_PKTDATA) ? 1 : 0;
         g_hold_on = (g_app_pktdata == OUR_PKTDATA) ? 1 : 0;
-        lc->lcPktData = OUR_PKTDATA; lc->lcMsgBase = WT_DEFBASE;
+        /* Keep the mask the app asked for. Krita requests 0x1fe4 (44 bytes);
+         * returning SAI's 36-byte 0x15e2 made it read pressure from Z. */
+        lc->lcPktData = g_app_pktdata;
+        lc->lcMoveMask = g_app_pktdata;
+        lc->lcMsgBase = WT_DEFBASE;
         g_ctx = *lc; g_have_ctx = TRUE;
         g_deliver_serial = g_serial;
         LeaveCriticalSection(&g_cs);
@@ -1767,9 +1771,11 @@ HANDLE WINAPI WTOpenA(HWND hwnd, LOGCONTEXTA *lc, BOOL enable) {
         g_app_pktdata = lc->lcPktData ? lc->lcPktData : OUR_PKTDATA;
         g_polling = (g_app_pktdata != OUR_PKTDATA) ? 1 : 0;
         g_hold_on = (g_app_pktdata == OUR_PKTDATA) ? 1 : 0;
-        lc->lcPktData = OUR_PKTDATA; lc->lcMsgBase = WT_DEFBASE;
+        lc->lcPktData = g_app_pktdata;
+        lc->lcMoveMask = g_app_pktdata;
+        lc->lcMsgBase = WT_DEFBASE;
         LOGCONTEXTW w; fill_default_context(&w);
-        w.lcPktData = OUR_PKTDATA; w.lcMsgBase = WT_DEFBASE;
+        w.lcPktData = g_app_pktdata; w.lcMsgBase = WT_DEFBASE;
         g_ctx = w; g_have_ctx = TRUE;
         g_deliver_serial = g_serial;
         LeaveCriticalSection(&g_cs);
