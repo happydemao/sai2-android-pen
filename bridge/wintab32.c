@@ -241,6 +241,8 @@ static BOOL  g_have_ctx;
  * tied to g_fetched), and delivery has its own cursor. */
 static volatile int g_polling;
 static UINT g_deliver_serial;
+static int g_host_sai;
+static int g_post_window = 96;
 /* The mask the app originally asked for. WTOpenW still returns OUR_PKTDATA to
  * SAI, but polling apps (FireAlpaca) interpret the buffer with their own mask;
  * WTPacketsGet builds that layout. */
@@ -695,7 +697,7 @@ static void emit_sample(const SAMPLE *s) {
         g_ring[ser % RING_SZ] = pk;
         g_ring_time[ser % RING_SZ] = GetTickCount();
         g_dirty = 0;
-    } else if (g_polling || (post = wtc_should_post(g_serial, g_fetched, transition, POST_WINDOW)) != 0) {
+    } else if (g_polling || (post = wtc_should_post(g_serial, g_fetched, transition, g_post_window)) != 0) {
         if (g_polling) post = TRUE;   /* polling apps consume the ring, not messages */
         ser = g_serial++;
         g_last_serial = ser;
@@ -749,7 +751,7 @@ static void flush_pending(void) {
     if (!g_open || !g_hwnd) return;
     UINT ser = 0; BOOL post = FALSE;
     EnterCriticalSection(&g_cs);
-    if (g_dirty && wtc_should_post(g_serial, g_fetched, 0, POST_WINDOW)) {
+    if (g_dirty && wtc_should_post(g_serial, g_fetched, 0, g_post_window)) {
         ser = g_serial++;
         g_last_serial = ser;
         g_ring_serial[ser % RING_SZ] = ser;
@@ -1500,7 +1502,125 @@ static DWORD WINAPI producer(LPVOID arg) {
 
 /* ---------------- exported WinTab API (only what SAI uses) --------------- */
 
+/* ---- SAI compatibility: the exact WTInfo surface and packet layout of
+ * 0.3.10. SAI became slower after the universal WinTab changes; the full
+ * device/cursor info made it choose a different path. Other apps keep the
+ * full surface below. ---- */
+static int host_is_sai(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    WCHAR path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+    cached = 0;
+    if (n > 0) {
+        for (DWORD i = 0; i + 8 <= n; i++) {
+            if ((path[i] == L's' || path[i] == L'S') &&
+                (path[i+1] == L'a' || path[i+1] == L'A') &&
+                (path[i+2] == L'i' || path[i+2] == L'I') &&
+                (path[i+3] == L'2' || path[i+3] == L'2') &&
+                path[i+4] == L'.' &&
+                (path[i+5] == L'e' || path[i+5] == L'E') &&
+                (path[i+6] == L'x' || path[i+6] == L'X') &&
+                (path[i+7] == L'e' || path[i+7] == L'E')) {
+                cached = 1; break;
+            }
+        }
+    }
+    return cached;
+}
+
+UINT WINAPI wt_info_sai_w(UINT cat, UINT idx, LPVOID out) {
+    log_line("WTInfoW cat=%u idx=%u out=%p", cat, idx, out);
+    switch (cat) {
+    case 0: return 200;
+    case WTI_INTERFACE:
+        switch (idx) {
+        case 1: { static const WCHAR id[]=L"Wine OwnTab 1.1"; if(out) memcpy(out,id,sizeof(id)); return sizeof(id); }
+        case 2: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }   /* SPECVERSION 1.1 */
+        case 3: { WORD v=(0)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
+        case 4: case 6: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }    /* NDEVICES/NCONTEXTS */
+        case 5: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }            /* NCURSORS */
+        default: return 0;
+        }
+    case WTI_DEFCONTEXT: case WTI_DDCTXS:
+        if (idx==0) { if(out) fill_default_context((LOGCONTEXTW*)out); return sizeof(LOGCONTEXTW); }
+        return 0;
+    case WTI_DEVICES:
+        switch (idx) {
+        case 15: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); } /* NPRESSURE */
+        case 17: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); } /* ORIENTATION */
+        case 1: { static const WCHAR n[]=L"Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        default: return 0;
+        }
+    case WTI_CURSORS:
+        switch (idx) {
+        case 1: { static const WCHAR n[]=L"Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case 8: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        default: { UINT z=0; if(out)*(UINT*)out=z; return sizeof(UINT); }
+        }
+    default: return 0;
+    }
+}
+
+
+/* ---- ANSI variants (SAI's "Ver.1 compatible" path may use these) ---------- */
+
+typedef struct {
+    char  lcName[LCNAMELEN];
+    UINT  lcOptions, lcStatus, lcLocks, lcMsgBase, lcDevice, lcPktRate;
+    WTPKT lcPktData, lcPktMode, lcMoveMask;
+    DWORD lcBtnDnMask, lcBtnUpMask;
+    LONG  lcInOrgX, lcInOrgY, lcInOrgZ, lcInExtX, lcInExtY, lcInExtZ;
+    LONG  lcOutOrgX, lcOutOrgY, lcOutOrgZ, lcOutExtX, lcOutExtY, lcOutExtZ;
+    DWORD lcSensX, lcSensY, lcSensZ;
+    BOOL  lcSysMode;
+    int   lcSysOrgX, lcSysOrgY, lcSysExtX, lcSysExtY;
+    DWORD lcSysSensX, lcSysSensY;
+} LOGCONTEXTA;
+
+static void fill_default_context_a(LOGCONTEXTA *lc) {
+    LOGCONTEXTW w; fill_default_context(&w);
+    memset(lc, 0, sizeof(*lc));
+    strcpy(lc->lcName, "OurDefault");
+    memcpy(&lc->lcOptions, &w.lcOptions, sizeof(LOGCONTEXTA) - LCNAMELEN);
+}
+
+
+UINT WINAPI wt_info_sai_a(UINT cat, UINT idx, LPVOID out) {
+    log_line("WTInfoA cat=%u idx=%u out=%p", cat, idx, out);
+    switch (cat) {
+    case 0: return 200;
+    case WTI_INTERFACE:
+        switch (idx) {
+        case 1: { static const char id[]="Wine OwnTab 1.1"; if(out) memcpy(out,id,sizeof(id)); return sizeof(id); }
+        case 2: { WORD v=(1)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
+        case 3: { WORD v=(0)|(1<<8); if(out)*(WORD*)out=v; return sizeof(WORD); }
+        case 4: case 5: case 6: { UINT n=1; if(out)*(UINT*)out=n; return sizeof(UINT); }
+        default: return 0;
+        }
+    case WTI_DEFCONTEXT: case WTI_DDCTXS:
+        if (idx==0) { if(out) fill_default_context_a((LOGCONTEXTA*)out); return sizeof(LOGCONTEXTA); }
+        return 0;
+    case WTI_DEVICES:
+        switch (idx) {
+        case 15: { AXIS a={0,MAX_PRESS,0,0}; if(out)*(AXIS*)out=a; return sizeof(AXIS); }
+        case 17: { AXIS a[3]={{0,3600,0,0},{0,900,0,0},{0,0,0,0}}; if(out)memcpy(out,a,sizeof(a)); return sizeof(a); }
+        case 1: { static const char n[]="Wine OwnTab"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        default: return 0;
+        }
+    case WTI_CURSORS:
+        switch (idx) {
+        case 1: { static const char n[]="Pen"; if(out)memcpy(out,n,sizeof(n)); return sizeof(n); }
+        case 8: { WTPKT m=OUR_PKTDATA; if(out)*(WTPKT*)out=m; return sizeof(WTPKT); }
+        default: { UINT z=0; if(out)*(UINT*)out=z; return sizeof(UINT); }
+        }
+    default: return 0;
+    }
+}
+
+
 UINT WINAPI WTInfoW(UINT cat, UINT idx, LPVOID out) {
+    if (host_is_sai()) return wt_info_sai_w(cat, idx, out);
     log_line("WTInfoW cat=%u idx=%u out=%p", cat, idx, out);
     switch (cat) {
     case 0: return 200;
@@ -1579,7 +1699,14 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
     if (lc) {
         log_ctx("WTOpenW ctx from app", lc);
         EnterCriticalSection(&g_cs);
+        g_host_sai = host_is_sai();
         g_app_pktdata = lc->lcPktData ? lc->lcPktData : OUR_PKTDATA;
+        if (g_host_sai) {
+            g_app_pktdata = OUR_PKTDATA;
+            g_post_window = 3;
+        } else {
+            g_post_window = 96;
+        }
         /* SAI asks exactly for OUR_PKTDATA; any other mask is a polling app
          * (FireAlpaca asks 0x1fe0). Do not apply SAI's click-hold / message
          * conflation to those: they wait for packets and would never start. */
@@ -1613,7 +1740,11 @@ int WINAPI WTPacket(HANDLE ctx, UINT serial, LPVOID buf) {
     mask = g_app_pktdata ? g_app_pktdata : OUR_PKTDATA;
     if (g_trace_start) wtc_st_fetch(&g_st, GetTickCount(), serial);
     LeaveCriticalSection(&g_cs);
-    wt_build_packet(&pk, serial, mask, buf);   /* layout follows lcPktData */
+    if (g_host_sai) {
+        memcpy(buf, &pk, sizeof(pk));          /* exact 0.3.10 layout */
+    } else {
+        wt_build_packet(&pk, serial, mask, buf);
+    }
     g_fetched = serial;                 /* track how current SAI is (backlog probe) */
     g_fetch_count++;                    /* points SAI actually drew (draw-rate probe) */
     LONG n = InterlockedIncrement(&count);
@@ -1689,29 +1820,8 @@ int  WINAPI WTPacketsGet(HANDLE ctx, int max, LPVOID buf) {
     return wt_fetch_packets(max, buf, 1);
 }
 
-/* ---- ANSI variants (SAI's "Ver.1 compatible" path may use these) ---------- */
-
-typedef struct {
-    char  lcName[LCNAMELEN];
-    UINT  lcOptions, lcStatus, lcLocks, lcMsgBase, lcDevice, lcPktRate;
-    WTPKT lcPktData, lcPktMode, lcMoveMask;
-    DWORD lcBtnDnMask, lcBtnUpMask;
-    LONG  lcInOrgX, lcInOrgY, lcInOrgZ, lcInExtX, lcInExtY, lcInExtZ;
-    LONG  lcOutOrgX, lcOutOrgY, lcOutOrgZ, lcOutExtX, lcOutExtY, lcOutExtZ;
-    DWORD lcSensX, lcSensY, lcSensZ;
-    BOOL  lcSysMode;
-    int   lcSysOrgX, lcSysOrgY, lcSysExtX, lcSysExtY;
-    DWORD lcSysSensX, lcSysSensY;
-} LOGCONTEXTA;
-
-static void fill_default_context_a(LOGCONTEXTA *lc) {
-    LOGCONTEXTW w; fill_default_context(&w);
-    memset(lc, 0, sizeof(*lc));
-    strcpy(lc->lcName, "OurDefault");
-    memcpy(&lc->lcOptions, &w.lcOptions, sizeof(LOGCONTEXTA) - LCNAMELEN);
-}
-
 UINT WINAPI WTInfoA(UINT cat, UINT idx, LPVOID out) {
+    if (host_is_sai()) return wt_info_sai_a(cat, idx, out);
     log_line("WTInfoA cat=%u idx=%u out=%p", cat, idx, out);
     switch (cat) {
     case 0: return 200;
