@@ -97,3 +97,15 @@ UDP 发送在独立线程，UI 线程只入队，不阻塞。
   - ACTION_MOVE 不再重复移光标（`handleEvent` 已移一次）；
   - ACTION_UP/CANCEL 松开；
 - 手指路径不变，仍然走手势和原生逻辑。
+
+
+## 大核绑定默认关闭（0.3.24）
+
+实测怀疑 `CoreTuner` 把 SAI 的 11 个线程全塞到 4 个大核，反而造成排队。
+0.3.24 起默认**不绑定**，交给 Android 调度器：
+
+- 默认：不启动 CoreTuner；
+- 想再试验：在 app files 下建空文件 `saipen-cores-on`；
+- 关闭时 `pb_perf.log` 会写 `core tuning off by default`。
+
+如果确认大核绑定是元凶，后面可以只绑最忙的 1~2 个线程，而不是全部。

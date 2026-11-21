@@ -40,6 +40,12 @@ final class CoreTuner {
     static synchronized void start() {
         if (started) return;
         started = true;
+        /* 默认关闭：先把 SAI 交给 Android 调度器。要重新试验大核绑定，
+         * 在 files 下建一个空文件 saipen-cores-on。 */
+        if (!new File("/data/data/com.winlator/files/saipen-cores-on").exists()) {
+            log("core tuning off by default");
+            return;
+        }
         try {
             Thread t = new Thread(new Runnable() {
                 @Override public void run() { loop(); }
