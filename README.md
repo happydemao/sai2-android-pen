@@ -12,55 +12,15 @@
 
 
 
-## 液化插件（liquify）
+## 液化插件（当前发行版未启用）
 
-在 SAI 里做「液化」：五种模式（向前变形 / 膨胀 / 收缩 / 旋转 / 平滑），带实时预览、
-选区限制、笔压控制强度，结果写回成真正的图层。
+液化的实验代码还在 `liquify/`、`android/Liquify*.java` 里，但**最近的发行版不再把它注入 APK**
+（不注册热键、不加 app 内按钮），所以界面上不会出现「液化」。
 
-### 用法
+原因是写回对齐不够可靠：SAI 复制到剪贴板时会裁到有内容的包围盒，粘贴又固定落在文档原点，
+而画布定位在部分缩放/滚动布局下仍会猜错。
 
-1. 容器启动后，屏幕左侧有一个蓝色圆钮 **`液化`**（app 内视图，不是 Wine 弹窗）；
-2. 点一下 → 叠加层盖住画纸可见区域，顶部工具栏：
-
-   ```
-   FWD BLT PNC CW CCW SMO MRG UND R- R+ OK X
-   ```
-
-   - `FWD…SMO`：五种模式，当前模式高亮；
-   - `MRG`：提交后合并回当前层（就地液化）；不点则提交成新图层（非破坏）；
-   - `UND`：撤销当前笔；`R-`/`R+`：笔刷半径 ×3/4、×4/3；
-   - `OK` 提交，`X` 放弃；
-3. 用笔在画纸上拖动 → 实时液化；底部状态栏显示 `R=半径 模式 P=笔压%`，
-   光标处有虚线圆环标出影响范围；
-4. 有选区时用 `wt_auto_sel` 通道：`Ctrl+C` 只复制选区包围盒，液化后原位贴回。
-
-### 它是怎么拿到像素的
-
-不碰 SAI 的私有缓冲，走它自己的官方通道：
-
-```
-Ctrl+A / Ctrl+C  →  剪贴板里的 CF_DIB（文档 1600×1600）
-                 →  lq.c 引擎变形（脏 tile 重建）
-                 →  32bpp CF_DIB 放回剪贴板 → Ctrl+V  →  SAI 新图层
-```
-
-写回是持久的（导出 PNG / 再次复制都能读到变形后的像素）。
-
-### 五模式引擎
-
-- `liquify/engine/lq.c`：C99 参考实现（逆位移场 + 快照重采样 + 64×64 脏 tile）；
-- `android/LiquifyWarp.java`：逐字节等价的 Java 移植（含 C→Java 对比测试）；
-- `android/liquify_jni.c` + NDK：同一份 `lq.c` 编成 arm64 原生库，
-  1600×1600 一笔 **63–71ms**（Java 解释执行要 900ms，Box64 x86 约 600ms）。
-
-### 已知边界
-
-- **多图层**：SAI 没有「隐藏其它图层」命令、图层面板是自绘的，所以目前按
-  「拼合结果或选区」液化，结果成新图层（`MRG` 可合并回当前层）；
-- **文件夹 / 蒙版**：未实现（蒙版可先用选区近似）；
-- 选区通道需要先用 `wt_auto_sel`（脚本）触发，按钮里暂未集成。
-
-详细实现和每一步的实测记录见 [`docs/21-liquify-writeback.md`](docs/21-liquify-writeback.md)。
+笔压桥不受影响，仍是本项目的核心功能；液化等对齐方案确定后再恢复。
 
 ## 包名（0.3.28 起）
 
@@ -90,7 +50,7 @@ SAI 自己支持 Wintab 数位板协议，Wine 自带的那份是空实现。所
                           画布：粗细随力度变化
 ```
 
-三个关键结论（都是实测出来的，见 [docs/06-device-test-log.md](./docs/06-device-test-log.md)）：
+三个关键结论（都是实机验证过的，排障与结论见 [docs/07-status-and-limits.md](./docs/07-status-and-limits.md)）：
 
 1. **SAI 是"只吃 Win32 + GDI 的最小闭包"**：不依赖 VC++ 运行库、不碰 D3D/OpenGL、自带图像编解码，
    所以 Wine 对它成熟度最高，不需要 DXVK/Turnip 调优。（PE 取证见 [docs/01-feasibility.md](./docs/01-feasibility.md)）
@@ -124,6 +84,7 @@ android/    安卓侧：PenBridge.java（编进 APK 的发送端）、build-apk.
             scripts/：容器内排查用的一次性 adb 脚本（历史存档，按需取用）
 dist/       预编译产物：wintab32.dll、wtprobe.exe、wt_pmax.txt、两个 .reg 注册表片段
 tools/      分析/自检工具：PE 取证、报文模拟发送、端到端校验、wt_status 解读
+liquify/    液化插件的实验代码（当前发行版未启用，见上文）
 docs/       设计、协议、打补丁、实测、排障、教程
 box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能跑再按需加）
 ```
@@ -136,7 +97,6 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | [02-bridge-design.md](./docs/02-bridge-design.md) | 压感桥的整体设计：为什么只能搬一半、"假 macOS 助手"方案、取舍 |
 | [03-wintab-dll-protocol.md](./docs/03-wintab-dll-protocol.md) | **报文协议** + DLL 用法 + 四处 smali 改动 + 编译 + 验收顺序 |
 | [04-patching-winlator.md](./docs/04-patching-winlator.md) | 打补丁实录：为什么只用 `{p0,p1}`、笔点击的原理、坑与回滚 |
-| [06-device-test-log.md](./docs/06-device-test-log.md) | 真机实测全记录，含原始日志与逐项结论 |
 | [07-status-and-limits.md](./docs/07-status-and-limits.md) | 当前可用形态、已知限制、后续可优化项 |
 | [08-winlator-quickstart.md](./docs/08-winlator-quickstart.md) | 不追求压感时的最小可用配置与性能调优 |
 | [09-install-tutorial.md](./docs/09-install-tutorial.md) | **图文安装教程**（新手向，三步装完） |

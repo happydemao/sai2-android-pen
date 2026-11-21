@@ -308,6 +308,5 @@ dist/pensender.dex              root 版发送端（app_process，兜底/对照�
 dist/wintab32.dll               DLL
 dist/wt_pmax.txt                内容 4095
 patch\*.sh                              容器内诊断脚本（strace/errlog/ini）
-07-status-and-limits.md / 06-device-test-log.md   状态与实测
-history/                                        早期交接与构建记录
+07-status-and-limits.md                    状态与限制
 ```

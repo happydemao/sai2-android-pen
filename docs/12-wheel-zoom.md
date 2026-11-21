@@ -43,7 +43,7 @@ SAI：PageUp/PageDown → 缩放画布
 
 ## 实测
 
-设备：Galaxy Tab S9+（SM-X810），SAI 2（[PivInk] 2026-10-19 构建）。
+设备：Galaxy Tab S9+（SM-X810），SAI 2（2026-10-19 构建）。
 
 ```text
 滚轮向下：75% -> 50%     （PageDown）

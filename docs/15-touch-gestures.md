@@ -14,7 +14,7 @@
 | 两指旋转 | `Shift+PageUp` / `Shift+PageDown` | 每次约 11.3°，方向跟随手指 |
 | 快速向内捏合 | `Ctrl+0` | 适合窗口 / 居中全屏；弹 Toast「适合窗口 / 居中全屏 (Ctrl+0)」 |
 
-缩放/旋转的键位是在 SM-X810 + `[PivInk]SAI 2026-10-19` 上实测后定的：
+缩放/旋转的键位是在 SM-X810 + `SAI Ver.2 2026-10-19` 上实测后定的：
 
 - `PageUp` / `PageDown`：SAI 默认「以光标位置为中心放大/缩小」，稳定可用；
 - `Ctrl+'-'` 能缩小，但 `Ctrl+'+'`、`Ctrl+Shift+'='`、`Ctrl+KP_ADD` 在这个构建里都不放大；
@@ -96,7 +96,7 @@ Winlator 原生 `TouchpadView` 对两指有自己的处理：
 
 ## 真机实测（0.3.8）
 
-设备：Galaxy Tab S9+（SM-X810），SAI 2 `[PivInk] 2026-10-19`，Winlator 11.2 容器。
+设备：Galaxy Tab S9+（SM-X810），SAI 2（2026-10-19 构建），Winlator 11.2 容器。
 多指事件用 `/dev/input/event11` (sec_touchscreen) 的 MT-B `sendevent` 注入，结果：
 
 - 两指轻点：SAI 撤销一步，Toast「撤销 (Ctrl+Z)」；

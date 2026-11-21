@@ -127,4 +127,4 @@ WTPacket ... press=0    lat=1ms     ← 抬笔/悬停
 
 - 不需要重编：DLL 与 `wt_pmax.txt` 放回 `drive_c` 即可
 - 若某台设备的笔完全不派发（如无显示关联的 HID），仍可用 root 版 `pensender.dex` + `app_process` 兜底
-- 相关脚本与记录见 [android/](../android/)、[06-device-test-log.md](./06-device-test-log.md)
+- 相关脚本见 [android/](../android/)；排障顺序与限制见 [04-patching-winlator.md](./04-patching-winlator.md)

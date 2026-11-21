@@ -105,8 +105,7 @@
 2. 补丁后的实际时延。
 3. 真实触控笔的 `getPressure()` 曲线。
 
-设备侧的四段检查单（每一段都有源码里真实存在的日志串作为判据）：
-👉 **[容器检查单（已归档）](./history/container-checklist-2026-11-18.md)**
+设备侧的验证顺序：先只验 DLL 能否加载，再验 WinTab 上下文是否打开，最后才验样本与压力。
 
 ---
 
@@ -179,7 +178,6 @@ Winlator 有多个活跃分支（Cmod / Bionic / Frost / Ludashi）。补丁点�
 | 文件 | 内容 |
 |---|---|
 | [03-wintab-dll-protocol.md](./03-wintab-dll-protocol.md) | Winlator 补丁的分步指南、代码位置、编译、验收、故障定位 |
-| [history/container-checklist-2026-11-18.md](./history/container-checklist-2026-11-18.md) | 设备到手后的四段检查单（**已过时**，0.3.0 起自动） |
 | [patch/SaiPressureBridge.java](../android/SaiPressureBridge.java) | 安卓侧 UDP 发送端（报文格式、历史点、缩放控制、非阻塞） |
 | [tools/verify_bridge.py](../tools/verify_bridge.py) | 端到端校验器：真实 Java 类 → 报文 → DLL 逻辑，30 个样本 |
 | [tools/wintab_reference.py](../tools/wintab_reference.py) | `wintab_core.h` 的逐行 Python 转写（解析 + 映射），校验的对照物 |
