@@ -1756,6 +1756,15 @@ static const char *gdi_class_of(HDC hdc) {
 static void *volatile g_cv_bits;
 static volatile int g_cv_w, g_cv_h, g_cv_stride, g_cv_bpp;
 static volatile int g_cv_x, g_cv_y, g_cv_cx, g_cv_cy;
+static volatile int g_cv_sx, g_cv_sy;   /* DIB source coords of the last blit */
+
+/* Every large 32bpp DIB SAI creates, so the document capture can look at all
+ * of them instead of trusting whichever one presented last (SAI keeps more
+ * than one canvas-sized buffer, and the last present is not always the one
+ * carrying the current stroke). */
+typedef struct { void *bits; int w, h; } DibRec;
+static DibRec g_dibs[8];
+static volatile int g_dib_n;
 static volatile HWND g_cv_dst;
 static volatile int g_want_capture;   /* set by the scan thread, consumed by a blit */
 static volatile int g_want_write;     /* C:\wt_write: paint a marker into the DIB */
@@ -1958,6 +1967,7 @@ static int WINAPI probe_SetDIBitsToDevice(HDC hdc, int x, int y, DWORD cx, DWORD
                                                     : ((w * bi->bmiHeader.biBitCount + 31) / 32) * 4;
             g_cv_bpp = bi->bmiHeader.biBitCount;
             g_cv_x = x; g_cv_y = y; g_cv_cx = (int)cx; g_cv_cy = (int)cy;
+            g_cv_sx = sx; g_cv_sy = sy;
             g_cv_dst = WindowFromDC(hdc);
             if (g_want_write) {
                 g_want_write = 0;
@@ -2021,6 +2031,17 @@ static HBITMAP WINAPI probe_CreateDIBSection(HDC hdc, const BITMAPINFO *bi, UINT
         gdi_log("CreateDIBSection %dx%d bpp=%d bits=%p",
                 bi->bmiHeader.biWidth, bi->bmiHeader.biHeight,
                 bi->bmiHeader.biBitCount, bits ? *bits : NULL);
+    if (h && bi && bits && *bits && bi->bmiHeader.biBitCount == 32) {
+        int w = bi->bmiHeader.biWidth, hh = bi->bmiHeader.biHeight;
+        if (w < 0) w = -w;
+        if (hh < 0) hh = -hh;
+        if (w >= 256 && hh >= 256 && g_dib_n < 8) {
+            g_dibs[g_dib_n].bits = *bits;
+            g_dibs[g_dib_n].w = w;
+            g_dibs[g_dib_n].h = hh;
+            ++g_dib_n;
+        }
+    }
     return h;
 }
 
@@ -2536,6 +2557,209 @@ static void clipboard_test(void) {
     CloseClipboard();
 }
 
+/* ---- document capture / paste (C:\wt_doccap, C:\wt_paste) ---------------
+ * The view DIB is screen-space, but the canvas child window only shows the
+ * paper inside it: mapping the child's client rect through the last blit's
+ * (dest -> src) pair gives the paper's rect in the DIB, and the paper's own
+ * pixels are one uniform colour. Cropping that rect yields document pixels at
+ * the current zoom, which is what the liquify commit needs to paste back.
+ */
+static int g_doc_x, g_doc_y, g_doc_w, g_doc_h, g_doc_zoom;
+
+static int row_white_run(const unsigned char *row, int npx, int *out_start) {
+    int best = 0, bs = 0, run = 0, st = 0;
+    for (int x = 0; x < npx; ++x) {
+        const unsigned char *q = row + (size_t)x * 4;
+        int w = (q[0] >= 0xF0 && q[1] >= 0xF0 && q[2] >= 0xF0);
+        if (w) { if (run == 0) st = x; ++run; if (run > best) { best = run; bs = st; } }
+        else run = 0;
+    }
+    *out_start = bs;
+    return best;
+}
+
+typedef struct { int top, bot, left, right; } Blk;
+
+/* Find the inked paper inside one 32bpp DIB. Returns 1 and fills the rect. */
+static int paper_in_dib(unsigned char *d, int dw, int dh, Blk *out, int *out_dark) {
+    static Blk blocks[64];
+    int nb = 0, cur = -1;
+    for (int y = 0; y < dh; ++y) {
+        int st = 0;
+        int len = row_white_run(d + (size_t)y * (size_t)dw * 4, dw, &st);
+        if (len < 256) { cur = -1; continue; }
+        if (cur >= 0) {
+            Blk *b = &blocks[cur];
+            if (st <= b->right + 8 && st + len - 1 >= b->left - 8 &&
+                len >= (b->right - b->left + 1) * 6 / 10) {
+                b->bot = y;
+                if (st < b->left) b->left = st;
+                if (st + len - 1 > b->right) b->right = st + len - 1;
+                continue;
+            }
+            cur = -1;
+        }
+        if (nb < 64) {
+            blocks[nb].top = blocks[nb].bot = y;
+            blocks[nb].left = st;
+            blocks[nb].right = st + len - 1;
+            cur = nb++;
+        }
+    }
+    int best = -1; long best_area = 0;
+    for (int i = 0; i < nb; ++i) {
+        Blk *b = &blocks[i];
+        int w = b->right - b->left + 1, h = b->bot - b->top + 1;
+        if (w < 64 || h < 64) continue;
+        long area = (long)w * h;
+        if (area <= best_area) continue;
+        int dark = 0;
+        for (int y = b->top; y <= b->bot; y += 2) {
+            const unsigned char *row = d + (size_t)y * (size_t)dw * 4;
+            for (int x = b->left; x <= b->right; x += 2) {
+                const unsigned char *q = row + (size_t)x * 4;
+                if (q[0] <= 0x30 && q[1] <= 0x30 && q[2] <= 0x30) ++dark;
+            }
+        }
+        if (dark < 8) continue;
+        best = i; best_area = area; *out_dark = dark;
+    }
+    if (best < 0) return 0;
+    *out = blocks[best];
+    return 1;
+}
+
+static void doc_capture(void) {
+    if (g_dib_n == 0 && !g_cv_bits) { ms_log("DOCCAP: no DIB known"); return; }
+    Blk best; int best_dark = 0; long best_area = 0;
+    void *best_bits = NULL; int best_w = 0, best_h = 0;
+    int tried = 0;
+    for (int i = 0; i <= g_dib_n; ++i) {
+        unsigned char *d;
+        int dw, dh;
+        if (i < g_dib_n) { d = (unsigned char*)g_dibs[i].bits; dw = g_dibs[i].w; dh = g_dibs[i].h; }
+        else { if (!g_cv_bits || !g_cv_stride || !g_cv_h) break;
+               d = (unsigned char*)g_cv_bits; dw = g_cv_stride / 4; dh = g_cv_h; }
+        if (!d || dw < 64 || dh < 64) continue;
+        ++tried;
+        Blk b; int dark = 0;
+        if (!paper_in_dib(d, dw, dh, &b, &dark)) continue;
+        long area = (long)(b.right - b.left + 1) * (b.bot - b.top + 1);
+        if (area > best_area) {
+            best = b; best_area = area; best_dark = dark;
+            best_bits = d; best_w = dw; best_h = dh;
+        }
+    }
+    if (!best_bits) { ms_log("DOCCAP: no inked paper in %d DIB(s)", tried); return; }
+    unsigned char *d = (unsigned char*)best_bits;
+    int dw = best_w, dh = best_h;
+    g_doc_x = best.left; g_doc_y = best.top;
+    g_doc_w = best.right - best.left + 1;
+    g_doc_h = best.bot - best.top + 1;
+
+    char title[128] = ""; GetWindowTextA(g_cv_dst, title, (int)sizeof title - 1);
+    int zoom = 100;
+    const char *pc = strrchr(title, '(');
+    if (pc) zoom = atoi(pc + 1);
+    if (zoom <= 0 || zoom > 6400) zoom = 100;
+    g_doc_zoom = zoom;
+
+    size_t dstride = (size_t)dw * 4;
+    size_t stride = (size_t)g_doc_w * 4;
+    size_t imgsz = stride * (size_t)g_doc_h;
+    unsigned char *img = (unsigned char*)malloc(imgsz);
+    if (!img) { ms_log("DOCCAP: out of memory"); return; }
+    for (int y = 0; y < g_doc_h; ++y)
+        memcpy(img + (size_t)y * stride,
+               d + (size_t)(g_doc_y + y) * dstride + (size_t)g_doc_x * 4, stride);
+
+    FILE *f = fopen("C:\\wt_doc.txt", "wb");
+    if (f) { fprintf(f, "%d %d %d %d %d\n", g_doc_x, g_doc_y, g_doc_w, g_doc_h, zoom); fclose(f); }
+    f = fopen("C:\\wt_doc.bin", "wb");
+    if (f) { fwrite(img, 1, imgsz, f); fclose(f); }
+    BITMAPFILEHEADER fh; memset(&fh, 0, sizeof fh);
+    BITMAPINFOHEADER ih; memset(&ih, 0, sizeof ih);
+    ih.biSize = sizeof ih; ih.biWidth = g_doc_w; ih.biHeight = g_doc_h;
+    ih.biPlanes = 1; ih.biBitCount = 32; ih.biCompression = BI_RGB;
+    ih.biSizeImage = (DWORD)imgsz;
+    fh.bfType = 0x4D42; fh.bfOffBits = sizeof fh + sizeof ih;
+    fh.bfSize = fh.bfOffBits + (DWORD)imgsz;
+    f = fopen("C:\\wt_doc.bmp", "wb");
+    if (f) {
+        fwrite(&fh, 1, sizeof fh, f);
+        fwrite(&ih, 1, sizeof ih, f);
+        for (int y = g_doc_h - 1; y >= 0; --y) fwrite(img + (size_t)y * stride, 1, stride, f);
+        fclose(f);
+    }
+    ms_log("DOCCAP: paper %d,%d %dx%d zoom=%d from %dx%d dark=%d dibs=%d title=%s",
+           g_doc_x, g_doc_y, g_doc_w, g_doc_h, zoom, dw, dh, best_dark, g_dib_n, title);
+    free(img);
+}
+
+/* Put a BGRA image (top-down rows, C:\wt_paste.bin + "w h" in wt_paste.txt)
+ * onto the clipboard as CF_DIB so SAI's Ctrl+V turns it into a layer. */
+static void doc_paste(void) {
+    int w = 0, h = 0;
+    FILE *cf = fopen("C:\\wt_paste.txt", "r");
+    if (cf) { if (fscanf(cf, "%d %d", &w, &h) != 2) w = h = 0; fclose(cf); }
+    if (w <= 0 || h <= 0) { ms_log("PASTE: bad size %dx%d", w, h); return; }
+    size_t stride = (size_t)w * 4;
+    size_t imgsz = stride * (size_t)h;
+    FILE *pf = fopen("C:\\wt_paste.bin", "rb");
+    if (!pf) { ms_log("PASTE: no wt_paste.bin"); return; }
+    unsigned char *img = (unsigned char*)malloc(imgsz);
+    size_t got = img ? fread(img, 1, imgsz, pf) : 0;
+    fclose(pf);
+    if (!img || got != imgsz) { free(img); ms_log("PASTE: short read %zu/%zu", got, imgsz); return; }
+
+    size_t total = sizeof(BITMAPINFOHEADER) + imgsz;
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, total);
+    if (!mem) { free(img); ms_log("PASTE: alloc failed"); return; }
+    unsigned char *p = (unsigned char*)GlobalLock(mem);
+    if (!p) { GlobalFree(mem); free(img); ms_log("PASTE: lock failed"); return; }
+    BITMAPINFOHEADER *ih = (BITMAPINFOHEADER*)p;
+    memset(ih, 0, sizeof *ih);
+    ih->biSize = sizeof *ih; ih->biWidth = w; ih->biHeight = h;
+    ih->biPlanes = 1; ih->biBitCount = 32; ih->biCompression = BI_RGB;
+    ih->biSizeImage = (DWORD)imgsz;
+    for (int y = 0; y < h; ++y)
+        memcpy(p + sizeof *ih + (size_t)y * stride, img + (size_t)(h - 1 - y) * stride, stride);
+    GlobalUnlock(mem);
+    free(img);
+    if (!OpenClipboard(NULL)) { GlobalFree(mem); ms_log("PASTE: OpenClipboard failed"); return; }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_DIB, mem)) { GlobalFree(mem); ms_log("PASTE: SetClipboardData failed"); }
+    else ms_log("PASTE: %dx%d CF_DIB placed (send Ctrl+V)", w, h);
+    CloseClipboard();
+}
+
+/* Read whatever SAI put on the clipboard (Ctrl+A / Ctrl+C). If SAI copies
+ * the active layer as CF_DIB, the plugin gets exact document pixels through a
+ * supported path instead of guessing which DIB/paper rectangle is live. */
+static void clipboard_read(void) {
+    if (!OpenClipboard(NULL)) { ms_log("CLIPREAD: OpenClipboard failed"); return; }
+    HANDLE h = GetClipboardData(CF_DIB);
+    if (!h) { CloseClipboard(); ms_log("CLIPREAD: no CF_DIB"); return; }
+    unsigned char *p = (unsigned char*)GlobalLock(h);
+    if (!p) { CloseClipboard(); ms_log("CLIPREAD: lock failed"); return; }
+    BITMAPINFOHEADER *ih = (BITMAPINFOHEADER*)p;
+    int w = ih->biWidth, hh = ih->biHeight;
+    int bpp = ih->biBitCount, comp = ih->biCompression;
+    size_t stride = (((size_t)w * bpp + 31) / 32) * 4;
+    size_t imgsz = stride * (size_t)(hh < 0 ? -hh : hh);
+    ms_log("CLIPREAD: %dx%d bpp=%d comp=%d imgsz=%zu hdr=%u",
+           w, hh, bpp, comp, imgsz, ih->biSize);
+    if (w > 0 && bpp == 32 && comp == 0 && imgsz > 0 && imgsz <= (32u << 20)) {
+        FILE *f = fopen("C:\\wt_clipin.bin", "wb");
+        if (f) { fwrite(p + ih->biSize, 1, imgsz, f); fclose(f); }
+        FILE *g = fopen("C:\\wt_clipin.txt", "wb");
+        if (g) { fprintf(g, "%d %d %d\n", w, hh, bpp); fclose(g); }
+        ms_log("CLIPREAD: dumped %zu bytes to C:\\wt_clipin.bin", imgsz);
+    }
+    GlobalUnlock(h);
+    CloseClipboard();
+}
+
 static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
@@ -2631,6 +2855,21 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
                 }
                 free(bf);
             }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_clipread") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_clipread");
+            clipboard_read();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_doccap") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_doccap");
+            doc_capture();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_paste") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_paste");
+            doc_paste();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_clip") != INVALID_FILE_ATTRIBUTES) {
