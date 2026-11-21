@@ -21,6 +21,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
+#include <math.h>
 #include <stddef.h>   /* offsetof, for the wire-format assertions */
 
 #include "wintab_core.h"   /* the pure logic (parse/map/conflate) — unit-tested natively */
@@ -2473,50 +2474,6 @@ static void find_surfaces(void) {
  * 32bpp slice of the canvas, i.e. mostly paper white *and* carrying ink.
  * The surface scan misses these because a decoded layer tile is not wrapped in
  * a surface object - the compositor reads raw tile pixels. */
-static void find_images(void) {
-    FILE *f = fopen("C:\\wt_images.log", "wb");
-    if (!f) return;
-    HANDLE self = GetCurrentProcess();
-    unsigned char *buf = (unsigned char*)malloc(0x10000);
-    if (!buf) { fclose(f); return; }
-    unsigned long long addr = 0x10000;
-    int hits = 0;
-    while (addr < 0x7FFFFFFF0000ull) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery((LPCVOID)(uintptr_t)addr, &mbi, sizeof mbi)) break;
-        unsigned long long base = (unsigned long long)(uintptr_t)mbi.BaseAddress;
-        unsigned long long size = (unsigned long long)mbi.RegionSize;
-        if (size == 0) break;
-        if (mbi.State == MEM_COMMIT &&
-            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) &&
-            !(mbi.Protect & PAGE_GUARD)) {
-            for (unsigned long long off = 0; off + 0x10000 <= size; off += 0x10000) {
-                SIZE_T got = 0;
-                if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)(base + off), buf, 0x10000, &got) ||
-                    got < 0x10000)
-                    continue;
-                int paper = 0, ink = 0, other = 0;
-                for (int k = 0; k + 4 <= 0x10000; k += 4) {
-                    int b = buf[k], g = buf[k+1], r = buf[k+2];
-                    if (b >= 0xE0 && g >= 0xE0 && r >= 0xE0) ++paper;
-                    else if (b <= 0x20 && g <= 0x20 && r <= 0x20) ++ink;
-                    else ++other;
-                }
-                if (paper >= 2000 && ink >= 100) {
-                    ++hits;
-                    fprintf(f, "IMAGE addr=%llx paper=%d ink=%d other=%d first=%02x%02x%02x%02x\n",
-                            base + off, paper, ink, other,
-                            buf[0], buf[1], buf[2], buf[3]);
-                }
-            }
-        }
-        addr = base + size;
-    }
-    fprintf(f, "done hits=%d\n", hits);
-    free(buf);
-    fclose(f);
-}
-
 /* Can the plugin deliver pixels to SAI through the OS clipboard? If Ctrl+V
  * turns this CF_DIB into a new layer, then a liquify result can be committed
  * through a supported SAI path without reverse engineering its tile format. */
@@ -3077,6 +3034,7 @@ static HDC g_ui_dc;
 static HBITMAP g_ui_bmp;
 static unsigned char *g_ui_bits;
 static void ui_update_window(void);
+static void ui_render_rect(int dx0, int dy0, int dx1, int dy1);
 static void ui_commit(void);
 static void ui_close(void);
 
@@ -3086,8 +3044,54 @@ static int g_ui_clicks;                        /* taps seen, so a tap can act */
 
 static const char *UI_MODES[6] = { "FWD", "BLT", "PNC", "CW", "CCW", "SMO" };
 
-#define UI_BTN_N 11
+#define UI_BTN_N 12
 static int g_ui_merge;   /* merge into the layer below after commit */
+
+/* current radius shown on the paper so the size is always visible */
+static void ui_draw_status(void) {
+    if (!g_ui_bits) return;
+    int bw = g_ui_w, bh = 16;
+    RECT r = { 0, UI_BAR_H + g_ui_h - bh, bw, UI_BAR_H + g_ui_h };
+    HBRUSH b = CreateSolidBrush(RGB(20, 20, 20));
+    FillRect(g_ui_dc, &r, b);
+    DeleteObject(b);
+    SetBkMode(g_ui_dc, TRANSPARENT);
+    SetTextColor(g_ui_dc, RGB(200, 220, 255));
+    char t[64];
+    int n = snprintf(t, sizeof t, "R=%d  %s%s", g_ui.radius,
+                     UI_MODES[g_ui.mode], g_ui_merge ? "  MERGE" : "");
+    TextOutA(g_ui_dc, 4, r.top + 1, t, n);
+    for (int y = r.top; y < r.bottom; ++y)
+        for (int x = r.left; x < r.right; ++x)
+            g_ui_bits[((size_t)y * g_ui_w + x) * 4 + 3] = 0xFF;
+}
+
+/* brush ring drawn straight into the layered surface, alternating colours so
+ * it stays visible on white and on the artwork */
+static int g_cur_x = -1, g_cur_y = -1, g_cur_r = -1;
+
+static void ui_draw_cursor(int cx, int cy, int rad) {
+    if (!g_ui_bits) return;
+    for (int a = 0; a < 720; ++a) {
+        double th = a * 3.14159265358979 / 360.0;
+        int x = cx + (int)(rad * cos(th));
+        int y = cy + (int)(rad * sin(th));
+        if (x < 0 || y < UI_BAR_H || x >= g_ui_w || y >= UI_BAR_H + g_ui_h) continue;
+        unsigned char *px = g_ui_bits + ((size_t)y * g_ui_w + x) * 4;
+        int on = (a / 16) & 1;
+        px[0] = on ? 255 : 0; px[1] = on ? 255 : 0; px[2] = on ? 255 : 0; px[3] = 0xFF;
+    }
+}
+
+static void ui_erase_ring(void) {
+    if (g_cur_r <= 0) return;
+    int sx0 = g_cur_x - g_cur_r - 2, sx1 = g_cur_x + g_cur_r + 2;
+    int sy0 = g_cur_y - g_cur_r - 2, sy1 = g_cur_y + g_cur_r + 2;
+    int dx0 = sx0 * g_ui.dw / g_ui_w, dx1 = sx1 * g_ui.dw / g_ui_w;
+    int dy0 = (sy0 - UI_BAR_H) * g_ui.dh / g_ui_h;
+    int dy1 = (sy1 - UI_BAR_H) * g_ui.dh / g_ui_h;
+    if (dx1 > dx0 && dy1 > dy0) ui_render_rect(dx0, dy0, dx1, dy1);
+}
 
 static void ui_bar_rect(int i, RECT *r) {
     int bw = g_ui_w / UI_BTN_N;
@@ -3115,9 +3119,10 @@ static void ui_draw_bar(void) {
         char buf[8];
         if (i < 6) label = UI_MODES[i];
         else if (i == 6) label = "MRG";
-        else if (i == 7) label = "R-";
-        else if (i == 8) label = "R+";
-        else if (i == 9) label = "OK";
+        else if (i == 7) label = "UND";
+        else if (i == 8) label = "R-";
+        else if (i == 9) label = "R+";
+        else if (i == 10) label = "OK";
         else label = "X";
         TextOutA(g_ui_dc, r.left + 4, r.top + 8, label, (int)strlen(label));
         (void)buf;
@@ -3136,12 +3141,22 @@ static void ui_bar_click(int ox, int oy) {
         if (ox < r.left || ox > r.right) continue;
         if (i < 6) g_ui.mode = i;
         else if (i == 6) g_ui_merge = !g_ui_merge;
-        else if (i == 7) { g_ui.radius = g_ui.radius > 16 ? g_ui.radius - 16 : 8; }
-        else if (i == 8) { g_ui.radius += 16; }
-        else if (i == 9) { ui_commit(); ui_close(); return; }
+        else if (i == 7) {
+            if (g_ui.ctx && lq_undo(g_ui.ctx)) {
+                ui_render_rect(0, 0, g_ui.dw - 1, g_ui.dh - 1);
+                ui_draw_bar();
+                ui_draw_status();
+                ui_update_window();
+            }
+            return;
+        }
+        else if (i == 8) { g_ui.radius = (int)(g_ui.radius * 3 / 4); if (g_ui.radius < 8) g_ui.radius = 8; }
+        else if (i == 9) { g_ui.radius = (int)(g_ui.radius * 4 / 3); if (g_ui.radius > 1024) g_ui.radius = 1024; }
+        else if (i == 10) { ui_commit(); ui_close(); return; }
         else { ui_close(); return; }
         if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
         ui_draw_bar();
+        ui_draw_status();
         ui_update_window();
         ms_log("UI: button %d -> mode=%d radius=%d", i, g_ui.mode, g_ui.radius);
         return;
@@ -3341,6 +3356,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     SelectObject(g_ui_dc, g_ui_bmp);
     ui_render_rect(0, 0, w - 1, h - 1);
     ui_draw_bar();
+    ui_draw_status();
 
     WNDCLASSEXA wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc;
@@ -3381,6 +3397,23 @@ static DWORD WINAPI ui_thread(LPVOID p) {
         float dx = (float)(p.x - g_ui_x) * g_ui.dw / g_ui_w;
         float dy = (float)(p.y - g_ui_y - UI_BAR_H) * g_ui.dh / g_ui_h;
 
+        if (!down && in_doc) {
+            int cx = (int)(p.x - g_ui_x);
+            int cy = (int)(p.y - g_ui_y);
+            int rad = (int)((double)g_ui.radius * g_ui_w / g_ui.dw);
+            if (rad < 3) rad = 3;
+            if (abs(cx - g_cur_x) >= 2 || abs(cy - g_cur_y) >= 2 ||
+                rad != g_cur_r) {
+                ui_erase_ring();
+                ui_draw_cursor(cx, cy, rad);
+                ui_update_window();
+                g_cur_x = cx; g_cur_y = cy; g_cur_r = rad;
+            }
+        } else if (g_cur_r > 0) {
+            ui_erase_ring();
+            ui_update_window();
+            g_cur_r = -1;
+        }
         if (down && in_bar) {
             /* clicks on the bar are handled by WM_LBUTTONDOWN; just make sure
              * the brush never starts there */
@@ -3643,11 +3676,6 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
         if (GetFileAttributesA("C:\\wt_clip") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_clip");
             clipboard_test();
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_images") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_images");
-            find_images();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_surfaces") != INVALID_FILE_ATTRIBUTES) {
