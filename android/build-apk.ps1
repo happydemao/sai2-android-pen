@@ -327,7 +327,7 @@ $t = Patch-Once $t @'
 
     move-result v7
 
-    if-eqz v7, :cond_33
+    if-nez v7, :cond_33
 
     .line 43
 '@ 'LocaleHelper env locale'
