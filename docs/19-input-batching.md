@@ -79,3 +79,21 @@ UDP 发送在独立线程，UI 线程只入队，不阻塞。
   - 积压 < 256：全收，不抽稀。
 
 丢的是“几乎重合的点”，拐点和长线的形状保留，长线卡顿会明显减轻。
+
+
+## 跳掉原生 TouchpadView（0.3.21）
+
+参考实现最关键的一步之前漏了：笔事件在 `onTouchEvent` 里直接消费并
+`return true`，**原生 TouchpadView 不再处理同一个 MotionEvent**。
+
+我们之前是 `handleTouch()` 处理完返回 false，原生代码又跑一遍：再移一次
+光标、再走手指/滚动逻辑。长线时这是双份 X server -> Wine -> SAI 开销。
+
+0.3.21：
+
+- 笔事件 `handleTouch()` 返回 true，smali 提前 return；
+- 点击/拖动由 `syncPenClick()` 合成：
+  - ACTION_DOWN 按下左键；
+  - ACTION_MOVE 不再重复移光标（`handleEvent` 已移一次）；
+  - ACTION_UP/CANCEL 松开；
+- 手指路径不变，仍然走手势和原生逻辑。

@@ -121,6 +121,7 @@ public final class PenBridge {
 
     /** 我们合成出来的左键是否处于按下状态。 */
     private static boolean penDown;
+    private static boolean penNativeDown;
     /* 手指按下期间（按下由 Winlator 原生补丁处理，我们只负责兜底松手） */
     private static java.lang.reflect.Field fPointer;
     private static java.lang.reflect.Method mIsPressed;
@@ -308,7 +309,7 @@ B64_32_2
         ensureBridgeFiles();
         final boolean pen = isPen(ev);
         if (pen) TouchGestures.cancel(pad);
-        handleEvent(pad, ev, pen, false);
+        handleEvent(pad, ev, pen, false, false);
     }
 
     /**
@@ -323,15 +324,18 @@ B64_32_2
         final boolean pen = isPen(ev);
         if (pen) {
             TouchGestures.cancel(pad);
-            handleEvent(pad, ev, true, false);
-            return false;
+            /* 关键：笔事件在这里消费掉，返回 true，让原生 TouchpadView 不再
+             * 处理同一个 MotionEvent。参考实现也是这样：原生路径会再移一次
+             * 光标/处理手指，长线时是双份开销。点击由 syncPenClick() 合成。 */
+            handleEvent(pad, ev, true, false, true);
+            return true;
         }
         final boolean consumed = TouchGestures.onTouch(pad, ev);
-        handleEvent(pad, ev, false, consumed);
+        handleEvent(pad, ev, false, consumed, false);
         return consumed;
     }
 
-    private static void handleEvent(View pad, MotionEvent ev, boolean pen, boolean consumed) {
+    private static void handleEvent(View pad, MotionEvent ev, boolean pen, boolean consumed, boolean nativeSkipped) {
         try {
             final int action = ev.getActionMasked();
             final float pressure = ev.getPressure();
@@ -404,6 +408,9 @@ B64_32_2
             }
             if (needsSyntheticClick(ev)) {
                 syncLeftButton(pad, x, y, pressure, action);
+            } else if (nativeSkipped) {
+                // 原生 TouchpadView 已被跳过，点击/拖动全部由这里合成
+                syncPenClick(pad, x, y, pressure, action);
             } else {
                 // 正规 STYLUS（S Pen）：原生 tap 已经会点，我们只在拖动/长按时补按下
                 syncDragOnly(pad, x, y, pressure, ev, action);
@@ -763,6 +770,52 @@ B64_32_2
                 flog("RELEASE " + why);
             }
         } catch (Throwable ignored) { }
+    }
+
+    /** 原生 TouchpadView 被跳过时的完整笔点击：DOWN 按下，UP 松开。
+     *  光标已在 handleEvent 里移到最新点，这里不再重复 injectPointerMove。 */
+    private static void syncPenClick(View pad, int x, int y, float pressure, int action) {
+        resolveReflection();
+        if (fXServer == null || mInjectPress == null || mInjectRelease == null || BUTTON_LEFT == null) {
+            return;
+        }
+        try {
+            Object xs = fXServer.get(pad);
+            if (xs == null) return;
+            final long now = SystemClock.uptimeMillis();
+            if (penNativeDown && now - lastPenEventMs > LOST_MS) {
+                penNativeDown = false;
+                mInjectRelease.invoke(xs, BUTTON_LEFT);
+                note("PEN_NATIVE_UP lost");
+            }
+            lastPenEventMs = now;
+
+            final boolean hoverZero = (action == MotionEvent.ACTION_HOVER_MOVE
+                    || action == MotionEvent.ACTION_HOVER_ENTER) && pressure <= 0f;
+            final boolean lifted = action == MotionEvent.ACTION_UP
+                    || action == MotionEvent.ACTION_CANCEL
+                    || action == MotionEvent.ACTION_POINTER_UP
+                    || action == MotionEvent.ACTION_HOVER_EXIT
+                    || hoverZero;
+            final boolean touching = action == MotionEvent.ACTION_DOWN
+                    || action == MotionEvent.ACTION_POINTER_DOWN
+                    || action == MotionEvent.ACTION_MOVE;
+
+            if (!penNativeDown && (action == MotionEvent.ACTION_DOWN
+                    || action == MotionEvent.ACTION_POINTER_DOWN)) {
+                penNativeDown = true;
+                mInjectPress.invoke(xs, BUTTON_LEFT);
+                note("PEN_NATIVE_DOWN " + x + "," + y + " pr=" + pressure);
+                armReleaseWatchdog(pad);
+            } else if (penNativeDown && (lifted || (!touching && pressure <= 0f))) {
+                penNativeDown = false;
+                mInjectRelease.invoke(xs, BUTTON_LEFT);
+                note("PEN_NATIVE_UP pr=" + pressure + " act=" + action);
+            }
+        } catch (Throwable t) {
+            penNativeDown = false;
+            try { Log.w(TAG, "pen click failed: " + t); } catch (Throwable ignored) { }
+        }
     }
 
     private static void syncDragOnly(View pad, int x, int y, float pressure,
