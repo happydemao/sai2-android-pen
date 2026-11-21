@@ -82,6 +82,8 @@ typedef struct {
 
 #define MAX_PRESS_CEILING 8191
 static int g_max_press = 1023;
+static int g_last_press;                       /* last WinTab pressure (0..4095) */
+static int g_ui_press_max;
 #define MAX_PRESS  g_max_press
 
 static void load_max_press(void) {
@@ -574,6 +576,8 @@ static void emit_sample(const SAMPLE *s) {
     pk.cursor = 0;
     pk.buttons  = down ? 1 : 0;
     pk.pressure = down ? (UINT)s->press : 0;
+    g_last_press = down ? (int)pk.pressure : 0;
+    if (g_last_press > g_ui_press_max) g_ui_press_max = g_last_press;
     /* screen position of this sample, for the stroke-start trace only */
     static int32_t trX, trY;
 
@@ -3058,8 +3062,9 @@ static void ui_draw_status(void) {
     SetBkMode(g_ui_dc, TRANSPARENT);
     SetTextColor(g_ui_dc, RGB(200, 220, 255));
     char t[64];
-    int n = snprintf(t, sizeof t, "R=%d  %s%s", g_ui.radius,
-                     UI_MODES[g_ui.mode], g_ui_merge ? "  MERGE" : "");
+    int n = snprintf(t, sizeof t, "R=%d  %s  P=%d%%%s", g_ui.radius,
+                     UI_MODES[g_ui.mode], g_last_press * 100 / 4096,
+                     g_ui_merge ? "  MERGE" : "");
     TextOutA(g_ui_dc, 4, r.top + 1, t, n);
     for (int y = r.top; y < r.bottom; ++y)
         for (int x = r.left; x < r.right; ++x)
@@ -3426,8 +3431,15 @@ static DWORD WINAPI ui_thread(LPVOID p) {
                 g_ui.lastx = dx; g_ui.lasty = dy;
                 ms_log("UI: down at doc %.0f,%.0f", dx, dy);
             } else if (g_ui.ctx && (dx != g_ui.lastx || dy != g_ui.lasty)) {
+                /* pen pressure drives the strength: light touch = subtle */
+                float pmul = 1.0f;
+                if (g_last_press > 0) {
+                    float p = g_last_press / 4095.0f;
+                    if (p > 1.0f) p = 1.0f;
+                    pmul = 0.2f + 0.8f * p;
+                }
                 lq_apply(g_ui.ctx, (lq_mode)g_ui.mode, g_ui.lastx, g_ui.lasty, dx, dy,
-                         (float)g_ui.radius, g_ui.strength);
+                         (float)g_ui.radius, g_ui.strength * pmul);
                 g_ui.lastx = dx; g_ui.lasty = dy;
                 int a[4];
                 lq_flush(g_ui.ctx, &a[0], &a[1], &a[2], &a[3]);
@@ -3438,7 +3450,9 @@ static DWORD WINAPI ui_thread(LPVOID p) {
             }
         } else if (g_ui.down) {
             g_ui.down = 0;
-            ms_log("UI: up at doc %.0f,%.0f", dx, dy);
+            ms_log("UI: up at doc %.0f,%.0f (peak pressure %d/4095)",
+                   dx, dy, g_ui_press_max);
+            g_ui_press_max = 0;
         }
 
         {
@@ -3456,28 +3470,6 @@ static DWORD WINAPI ui_thread(LPVOID p) {
                 ui_update_window();
                 ms_log("UI: undo");
             }
-        }
-        if (GetFileAttributesA("C:\\wt_ui_mode") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_ui_mode");
-            FILE *mf = fopen("C:\\wt_ui.txt", "r");
-            char mm[32] = "forward";
-            int mr = g_ui.radius; float mst = g_ui.strength;
-            if (mf) {
-                if (fscanf(mf, "%31s %d %f", mm, &mr, &mst) < 1) strcpy(mm, "forward");
-                fclose(mf);
-            }
-            int newmode = 0;
-            if (!strcmp(mm, "bloat")) newmode = 1;
-            else if (!strcmp(mm, "pinch")) newmode = 2;
-            else if (!strcmp(mm, "twirl_cw")) newmode = 3;
-            else if (!strcmp(mm, "twirl_ccw")) newmode = 4;
-            else if (!strcmp(mm, "smooth")) newmode = 5;
-            g_ui.mode = newmode;
-            g_ui.radius = mr;
-            g_ui.strength = mst;
-            /* a new stroke starts a fresh field, matching lq.c's stroke model */
-            if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
-            ms_log("UI: mode=%s radius=%d strength=%.2f", mm, mr, mst);
         }
         if (GetFileAttributesA("C:\\wt_ui_done") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_ui_done");
@@ -3533,6 +3525,104 @@ static DWORD WINAPI hotkey_thread(LPVOID p) {
         DispatchMessageA(&msg);
     }
     UnregisterHotKey(g_hotkey_wnd, 1);
+    return 0;
+}
+
+/* ---- floating launcher button (touch entry point) ----------------------
+ * Winlator's virtual keyboard cannot deliver a Wine RegisterHotKey combo, so
+ * the plugin also puts a small draggable button on screen: tap = open the
+ * liquify overlay, drag = move it somewhere harmless. It stays on top and
+ * never takes focus away from SAI.
+ */
+static HWND g_launch_wnd;
+static int g_launch_drag, g_launch_moved, g_launch_pinned;
+static int g_launch_dx, g_launch_dy, g_launch_sx, g_launch_sy;
+
+static LRESULT CALLBACK launcher_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        HBRUSH b = CreateSolidBrush(RGB(0, 110, 200));
+        FillRect(dc, &rc, b);
+        DeleteObject(b);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        DrawTextA(dc, "LQ", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        POINT p;
+        RECT r;
+        GetCursorPos(&p);
+        GetWindowRect(h, &r);
+        g_launch_dx = p.x - r.left;
+        g_launch_dy = p.y - r.top;
+        g_launch_sx = p.x;
+        g_launch_sy = p.y;
+        g_launch_drag = 1;
+        g_launch_moved = 0;
+        SetCapture(h);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!g_launch_drag) return 0;
+        POINT p;
+        GetCursorPos(&p);
+        if (abs(p.x - g_launch_sx) > 4 || abs(p.y - g_launch_sy) > 4) {
+            g_launch_moved = 1;
+            SetWindowPos(h, HWND_TOPMOST, p.x - g_launch_dx, p.y - g_launch_dy,
+                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        g_launch_drag = 0;
+        ReleaseCapture();
+        if (g_launch_moved) {
+            g_launch_pinned = 1;
+            ms_log("LAUNCH: button moved");
+        } else if (!g_ui_hwnd) {
+            CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
+            ms_log("LAUNCH: opening liquify overlay");
+        }
+        return 0;
+    }
+    case WM_TIMER:
+        if (!g_launch_pinned && g_hwnd) {
+            RECT r;
+            GetWindowRect(g_hwnd, &r);
+            SetWindowPos(h, HWND_TOPMOST, r.right - 64, r.bottom - 108,
+                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static DWORD WINAPI launcher_thread(LPVOID p) {
+    (void)p;
+    WNDCLASSA wc;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = launcher_wndproc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "LiquifyLauncher";
+    RegisterClassA(&wc);
+    g_launch_wnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                                   "LiquifyLauncher", "LQ", WS_POPUP,
+                                   100, 100, 52, 52, NULL, NULL, wc.hInstance, NULL);
+    if (!g_launch_wnd) { ms_log("LAUNCH: create failed"); return 0; }
+    ShowWindow(g_launch_wnd, SW_SHOWNOACTIVATE);
+    SetTimer(g_launch_wnd, 1, 800, NULL);
+    ms_log("LAUNCH: floating button ready");
+    MSG msg;
+    while (GetMessageA(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
     return 0;
 }
 
@@ -3822,6 +3912,7 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
     if (!g_hotkey_started) {
         g_hotkey_started = 1;
         CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
+        CreateThread(NULL, 0, launcher_thread, NULL, 0, NULL);
     }
     if (lc) {
         log_ctx("WTOpenW ctx from app", lc);
