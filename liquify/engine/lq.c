@@ -219,6 +219,18 @@ void lq_apply(lq_ctx *c, lq_mode mode, float x0, float y0, float x1, float y1,
                 oy = ry - ddy;
                 break;
             }
+            case LQ_RECONSTRUCT: {
+                /* GIMP's warp "erase" / the reference plugin's 重建: shrink the
+                 * displacement already in the field instead of sampling. */
+                int tx = x / LQ_TILE, ty = y / LQ_TILE;
+                lq_tile *t = tile_get(c, tx, ty);
+                if (!t) continue;
+                size_t o = (size_t)(y % LQ_TILE) * LQ_TILE + (x % LQ_TILE);
+                float keep = 1.0f - w;
+                t->dx[o] = (int16_t)lrintf((float)t->dx[o] * keep);
+                t->dy[o] = (int16_t)lrintf((float)t->dy[o] * keep);
+                continue;
+            }
             case LQ_SMOOTH: {
                 /* Blur is destructive on purpose: it has no displacement to
                  * express. Weighted toward the centre of the brush. */
@@ -270,24 +282,57 @@ void lq_apply(lq_ctx *c, lq_mode mode, float x0, float y0, float x1, float y1,
     }
 }
 
-static inline void sample_bilinear(const uint8_t *snap, int stride, int w, int h,
-                                   float sx, float sy, uint8_t out[4]) {
+/* 4x4 Catmull-Rom. Separable: 4 horizontal sums then 4 vertical ones.
+ * Edge pixels clamp, so a warp near the border does not pull in transparent
+ * black and produce dark fringes. */
+static inline void sample_catmull(const uint8_t *snap, int stride, int w, int h,
+                                  float sx, float sy, uint8_t out[4]) {
     if (sx < 0.0f) sx = 0.0f;
     if (sy < 0.0f) sy = 0.0f;
     if (sx > (float)(w - 1)) sx = (float)(w - 1);
     if (sy > (float)(h - 1)) sy = (float)(h - 1);
-    int x0 = (int)sx, y0 = (int)sy;
-    int x1 = x0 + 1 < w ? x0 + 1 : x0;
-    int y1 = y0 + 1 < h ? y0 + 1 : y0;
-    float fx = sx - (float)x0, fy = sy - (float)y0;
-    const uint8_t *p00 = snap + (size_t)y0 * stride + (size_t)x0 * 4;
-    const uint8_t *p10 = snap + (size_t)y0 * stride + (size_t)x1 * 4;
-    const uint8_t *p01 = snap + (size_t)y1 * stride + (size_t)x0 * 4;
-    const uint8_t *p11 = snap + (size_t)y1 * stride + (size_t)x1 * 4;
+    int ix = (int)sx, iy = (int)sy;
+    float fx = sx - (float)ix, fy = sy - (float)iy;
+    float wx[4], wy[4];
+    {
+        float t = fx, t2 = t * t, t3 = t2 * t;
+        wx[0] = -0.5f * t3 + t2 - 0.5f * t;
+        wx[1] = 1.5f * t3 - 2.5f * t2 + 1.0f;
+        wx[2] = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+        wx[3] = 0.5f * t3 - 0.5f * t2;
+        t = fy; t2 = t * t; t3 = t2 * t;
+        wy[0] = -0.5f * t3 + t2 - 0.5f * t;
+        wy[1] = 1.5f * t3 - 2.5f * t2 + 1.0f;
+        wy[2] = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+        wy[3] = 0.5f * t3 - 0.5f * t2;
+    }
+    float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (int j = 0; j < 4; ++j) {
+        int yy = iy - 1 + j;
+        if (yy < 0) yy = 0;
+        if (yy > h - 1) yy = h - 1;
+        const uint8_t *row = snap + (size_t)yy * stride;
+        float sum[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        for (int i = 0; i < 4; ++i) {
+            int xx = ix - 1 + i;
+            if (xx < 0) xx = 0;
+            if (xx > w - 1) xx = w - 1;
+            const uint8_t *p = row + (size_t)xx * 4;
+            sum[0] += wx[i] * (float)p[0];
+            sum[1] += wx[i] * (float)p[1];
+            sum[2] += wx[i] * (float)p[2];
+            sum[3] += wx[i] * (float)p[3];
+        }
+        acc[0] += wy[j] * sum[0];
+        acc[1] += wy[j] * sum[1];
+        acc[2] += wy[j] * sum[2];
+        acc[3] += wy[j] * sum[3];
+    }
     for (int k = 0; k < 4; ++k) {
-        float top = p00[k] + (p10[k] - p00[k]) * fx;
-        float bot = p01[k] + (p11[k] - p01[k]) * fx;
-        out[k] = (uint8_t)(top + (bot - top) * fy + 0.5f);
+        float v = acc[k] + 0.5f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 255.0f) v = 255.0f;
+        out[k] = (uint8_t)v;
     }
 }
 
@@ -317,7 +362,7 @@ void lq_flush(lq_ctx *c, int *minx, int *miny, int *maxx, int *maxy) {
                     int16_t dx = t->dx[o], dy = t->dy[o];
                     if (!dx && !dy) continue;
                     uint8_t px[4];
-                    sample_bilinear(p->snapshot, c->stride, c->w, c->h,
+                    sample_catmull(p->snapshot, c->stride, c->w, c->h,
                                     (float)x + (float)dx / FIX,
                                     (float)y + (float)dy / FIX, px);
                     memcpy(drow + (size_t)x * 4, px, 4);

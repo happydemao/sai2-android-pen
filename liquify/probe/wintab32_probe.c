@@ -3076,9 +3076,9 @@ static volatile int g_ui_starting;
 #define UI_BAR_H 34
 static int g_ui_clicks;                        /* taps seen, so a tap can act */
 
-static const char *UI_MODES[6] = { "FWD", "BLT", "PNC", "CW", "CCW", "SMO" };
+static const char *UI_MODES[7] = { "FWD", "BLT", "PNC", "CW", "CCW", "SMO", "REC" };
 
-#define UI_BTN_N 12
+#define UI_BTN_N 13
 static int g_ui_merge;   /* merge into the layer below after commit */
 
 /* current radius shown on the paper so the size is always visible */
@@ -3154,11 +3154,26 @@ static int ui_locate_content(void) {
         }
     }
     if (bestx < 0) return 0;
-    /* how far the best match is from the paper origin */
+    /* A weak match means the content is hidden, the snapshot is stale or the
+     * capture is uniform: guessing an offset there is what pushed earlier
+     * pastes far off the canvas. Refuse instead (same rule as the reference
+     * implementation: never pad with an unverified position). */
+    if (bestd > (long)LOC_N * LOC_N * 900L) {
+        ms_log("UI: locate weak (d=%ld), not padding", bestd);
+        return 0;
+    }
     g_doc_offx = bestx - g_paper_dib_x;
     g_doc_offy = besty - g_paper_dib_y;
-    if (g_doc_offx < 0) g_doc_offx = 0;
-    if (g_doc_offy < 0) g_doc_offy = 0;
+    if (g_doc_offx < 0 || g_doc_offy < 0) return 0;
+    /* the padded image must stay inside the paper we detected */
+    if (g_paper_dib_w > 32 && g_paper_dib_h > 32) {
+        if (g_doc_offx + g_ui.dw > g_paper_dib_w + 4 ||
+            g_doc_offy + g_ui.dh > g_paper_dib_h + 4) {
+            ms_log("UI: offset %d,%d out of paper %dx%d", g_doc_offx, g_doc_offy,
+                   g_paper_dib_w, g_paper_dib_h);
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -3246,19 +3261,19 @@ static void ui_draw_bar(void) {
     SetBkMode(g_ui_dc, TRANSPARENT);
     for (int i = 0; i < UI_BTN_N; ++i) {
         RECT r; ui_bar_rect(i, &r);
-        int active = (i < 6 && i == g_ui.mode) || (i == 6 && g_ui_merge);
+        int active = (i < 7 && i == g_ui.mode) || (i == 7 && g_ui_merge);
         HBRUSH b = CreateSolidBrush(active ? RGB(0, 120, 215) : RGB(70, 70, 70));
         FillRect(g_ui_dc, &r, b);
         DeleteObject(b);
         SetTextColor(g_ui_dc, RGB(235, 235, 235));
         const char *label;
         char buf[8];
-        if (i < 6) label = UI_MODES[i];
-        else if (i == 6) label = "MRG";
-        else if (i == 7) label = "UND";
-        else if (i == 8) label = "R-";
-        else if (i == 9) label = "R+";
-        else if (i == 10) label = "OK";
+        if (i < 7) label = UI_MODES[i];
+        else if (i == 7) label = "MRG";
+        else if (i == 8) label = "UND";
+        else if (i == 9) label = "R-";
+        else if (i == 10) label = "R+";
+        else if (i == 11) label = "OK";
         else label = "X";
         TextOutA(g_ui_dc, r.left + 4, r.top + 8, label, (int)strlen(label));
         (void)buf;
@@ -3275,9 +3290,9 @@ static void ui_bar_click(int ox, int oy) {
     for (int i = 0; i < UI_BTN_N; ++i) {
         RECT r; ui_bar_rect(i, &r);
         if (ox < r.left || ox > r.right) continue;
-        if (i < 6) g_ui.mode = i;
-        else if (i == 6) g_ui_merge = !g_ui_merge;
-        else if (i == 7) {
+        if (i < 7) g_ui.mode = i;
+        else if (i == 7) g_ui_merge = !g_ui_merge;
+        else if (i == 8) {
             if (g_ui.ctx && lq_undo(g_ui.ctx)) {
                 ui_render_rect(0, 0, g_ui.dw - 1, g_ui.dh - 1);
                 ui_draw_bar();
@@ -3286,9 +3301,9 @@ static void ui_bar_click(int ox, int oy) {
             }
             return;
         }
-        else if (i == 8) { g_ui.radius = (int)(g_ui.radius * 3 / 4); if (g_ui.radius < 8) g_ui.radius = 8; }
-        else if (i == 9) { g_ui.radius = (int)(g_ui.radius * 4 / 3); if (g_ui.radius > 1024) g_ui.radius = 1024; }
-        else if (i == 10) { ui_commit(); ui_close(); return; }
+        else if (i == 9) { g_ui.radius = (int)(g_ui.radius * 3 / 4); if (g_ui.radius < 8) g_ui.radius = 8; }
+        else if (i == 10) { g_ui.radius = (int)(g_ui.radius * 4 / 3); if (g_ui.radius > 1024) g_ui.radius = 1024; }
+        else if (i == 11) { ui_commit(); ui_close(); return; }
         else { ui_close(); return; }
         if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
         ui_draw_bar();

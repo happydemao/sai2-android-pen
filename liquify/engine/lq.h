@@ -34,6 +34,7 @@ typedef enum {
     LQ_TWIRL_CW,      /* rotate pixels clockwise */
     LQ_TWIRL_CCW,     /* rotate pixels counter-clockwise */
     LQ_SMOOTH,        /* local average, no displacement */
+    LQ_RECONSTRUCT,   /* pull the accumulated displacement back toward zero */
     LQ_MODE_COUNT
 } lq_mode;
 

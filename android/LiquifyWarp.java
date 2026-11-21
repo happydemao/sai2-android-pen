@@ -23,6 +23,7 @@ public final class LiquifyWarp {
     public static final int TWIRL_CW = 3;
     public static final int TWIRL_CCW = 4;
     public static final int SMOOTH = 5;
+    public static final int RECONSTRUCT = 6;
 
     private static final int B = 1024;            /* twirl table resolution */
     private static final float[] TAB_COS = new float[B + 1];
@@ -94,6 +95,9 @@ public final class LiquifyWarp {
 
         if (mode == SMOOTH)
             return warpSmooth(img, w, h, bx0, bx1, by0, by1,
+                    x0, y0, x1, y1, radius, strength, steps);
+        if (mode == RECONSTRUCT)
+            return warpReconstruct(img, w, h, bx0, bx1, by0, by1,
                     x0, y0, x1, y1, radius, strength, steps);
 
         byte[] snap = img.clone();
@@ -208,31 +212,95 @@ public final class LiquifyWarp {
             for (int x = 0; x < bw; ++x) {
                 float fx = dx[row + x], fy = dy[row + x];
                 if (fx == 0f && fy == 0f) continue;
-                sampleBilinear(snap, w, h, stride, bx0 + x + fx, dyi + fy,
+                sampleCatmull(snap, w, h, stride, bx0 + x + fx, dyi + fy,
                         img, dyi * stride + (bx0 + x) * 4);
             }
         }
     }
 
-    private static void sampleBilinear(byte[] snap, int w, int h, int stride,
-                                       float sx, float sy, byte[] dst, int off) {
+    /* 4x4 Catmull-Rom, same arithmetic as lq.c's sample_catmull(). */
+    private static void sampleCatmull(byte[] snap, int w, int h, int stride,
+                                      float sx, float sy, byte[] dst, int off) {
         if (sx < 0f) sx = 0f;
         if (sy < 0f) sy = 0f;
         if (sx > w - 1) sx = w - 1;
         if (sy > h - 1) sy = h - 1;
-        int x0i = (int) sx, y0i = (int) sy;
-        int x1i = x0i + 1 < w ? x0i + 1 : x0i;
-        int y1i = y0i + 1 < h ? y0i + 1 : y0i;
-        float fx = sx - x0i, fy = sy - y0i;
-        int o00 = y0i * stride + x0i * 4;
-        int o10 = y0i * stride + x1i * 4;
-        int o01 = y1i * stride + x0i * 4;
-        int o11 = y1i * stride + x1i * 4;
-        for (int k = 0; k < 4; ++k) {
-            float top = (snap[o00 + k] & 0xFF) + ((snap[o10 + k] & 0xFF) - (snap[o00 + k] & 0xFF)) * fx;
-            float bot = (snap[o01 + k] & 0xFF) + ((snap[o11 + k] & 0xFF) - (snap[o01 + k] & 0xFF)) * fx;
-            dst[off + k] = (byte) (int) (top + (bot - top) * fy + 0.5f);
+        int ix = (int) sx, iy = (int) sy;
+        float fx = sx - ix, fy = sy - iy;
+        float[] wx = new float[4], wy = new float[4];
+        float t = fx, t2 = t * t, t3 = t2 * t;
+        wx[0] = -0.5f * t3 + t2 - 0.5f * t;
+        wx[1] = 1.5f * t3 - 2.5f * t2 + 1.0f;
+        wx[2] = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+        wx[3] = 0.5f * t3 - 0.5f * t2;
+        t = fy; t2 = t * t; t3 = t2 * t;
+        wy[0] = -0.5f * t3 + t2 - 0.5f * t;
+        wy[1] = 1.5f * t3 - 2.5f * t2 + 1.0f;
+        wy[2] = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+        wy[3] = 0.5f * t3 - 0.5f * t2;
+        float[] acc = new float[4];
+        for (int j = 0; j < 4; ++j) {
+            int yy = iy - 1 + j;
+            if (yy < 0) yy = 0;
+            if (yy > h - 1) yy = h - 1;
+            float[] sum = new float[4];
+            for (int i = 0; i < 4; ++i) {
+                int xx = ix - 1 + i;
+                if (xx < 0) xx = 0;
+                if (xx > w - 1) xx = w - 1;
+                int o = yy * stride + xx * 4;
+                sum[0] += wx[i] * (snap[o] & 0xFF);
+                sum[1] += wx[i] * (snap[o + 1] & 0xFF);
+                sum[2] += wx[i] * (snap[o + 2] & 0xFF);
+                sum[3] += wx[i] * (snap[o + 3] & 0xFF);
+            }
+            acc[0] += wy[j] * sum[0];
+            acc[1] += wy[j] * sum[1];
+            acc[2] += wy[j] * sum[2];
+            acc[3] += wy[j] * sum[3];
         }
+        for (int k = 0; k < 4; ++k) {
+            float v = acc[k] + 0.5f;
+            if (v < 0f) v = 0f;
+            if (v > 255f) v = 255f;
+            dst[off + k] = (byte) (int) v;
+        }
+    }
+
+    /* GIMP's warp erase / the reference plugin's 重建: the stroke shrinks the
+     * displacement instead of adding to it. The Java fallback keeps its own
+     * field for the stroke, so it just scales that field. */
+    private static byte[] warpReconstruct(byte[] img, int w, int h,
+                                          int bx0, int bx1, int by0, int by1,
+                                          float x0, float y0, float x1, float y1,
+                                          float radius, float strength, int steps) {
+        int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+        if (bw <= 0 || bh <= 0) return img;
+        float[] dx = new float[bw * bh];
+        float[] dy = new float[bw * bh];
+        float invR = 1.0f / radius;
+        for (int s = 1; s <= steps; ++s) {
+            float t = (float) s / steps;
+            float px = x0 + (x1 - x0) * t;
+            float py = y0 + (y1 - y0) * t;
+            int ix0 = clamp((int) Math.floor(px - radius - 1), bx0, bx1);
+            int ix1 = clamp((int) Math.ceil(px + radius + 1), bx0, bx1);
+            int iy0 = clamp((int) Math.floor(py - radius - 1), by0, by1);
+            int iy1 = clamp((int) Math.ceil(py + radius + 1), by0, by1);
+            for (int y = iy0; y <= iy1; ++y) {
+                int row = (y - by0) * bw;
+                for (int x = ix0; x <= ix1; ++x) {
+                    float ddx = x - px, ddy = y - py;
+                    float d = (float) Math.sqrt(ddx * ddx + ddy * ddy) * invR;
+                    float wgt = falloffD(d) * strength;
+                    if (wgt <= 0.0001f) continue;
+                    int o = row + (x - bx0);
+                    dx[o] = quant((double) dx[o] * (1.0f - wgt));
+                    dy[o] = quant((double) dy[o] * (1.0f - wgt));
+                }
+            }
+        }
+        return img;
     }
 
     /** 与 lq.c 的 LQ_SMOOTH 完全一致：逐步、按 falloff 半径盒式模糊后按权重混合。 */
