@@ -83,6 +83,8 @@ typedef struct {
 #define MAX_PRESS_CEILING 8191
 static int g_max_press = 1023;
 static void send_plain_key(char c);
+static void send_key_state(char c, int down);
+static void ms_log(const char *fmt, ...);
 static void ensure_plugin_threads(void);
 static int g_last_press;                       /* last WinTab pressure (0..4095) */
 static volatile int g_eraser;                  /* pen's eraser end is down */
@@ -1404,10 +1406,10 @@ static DWORD WINAPI producer(LPVOID arg) {
                 else if (ctl.kind == WTC_CTL_ERASER) {
                     if (g_eraser != ctl.eraser) {
                         g_eraser = ctl.eraser;
-                        log_line("ERASER %d", ctl.eraser);
+                        ms_log("ERASER udp=%d", ctl.eraser);
                         /* SAI ignores the WinTab cursor index, but its own tool
                          * shortcuts work: E = eraser, N = brush. */
-                        send_plain_key(g_eraser ? 'e' : 'n');
+                        send_key_state('e', g_eraser);
                     }
                 }
                 else                          wake_datagram(ctl.wake);
@@ -3221,13 +3223,26 @@ static void ui_update_window(void) {
 
 static void send_plain_key(char c);
 
-static void send_plain_key(char c) {
+/* Hold E while the pen button / eraser is active. SAI's "hold E = temporary
+ * eraser" mode switches to the eraser on key-down and restores the previous
+ * tool on key-up, so the user's brush is never replaced. */
+static void send_key_state(char c, int down) {
     SHORT vk = (SHORT)VkKeyScanA(c);
-    if (vk == -1) return;
+    if (vk == -1) { ms_log("KEY: no vk for %c", c); return; }
     BYTE v = (BYTE)(vk & 0xFF);
-    keybd_event(v, 0, 0, 0);
+    keybd_event(v, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
+    HWND t = g_hwnd ? g_hwnd : GetForegroundWindow();
+    if (t) {
+        if (down) PostMessageA(t, WM_KEYDOWN, v, 1);
+        else      PostMessageA(t, WM_KEYUP, v, 1 | 0xC0000000);
+    }
+    ms_log("KEY: %c %s (vk=%d, target=%p)", c, down ? "down" : "up", v, (void*)t);
+}
+
+static void send_plain_key(char c) {
+    send_key_state(c, 1);
     Sleep(30);
-    keybd_event(v, 0, KEYEVENTF_KEYUP, 0);
+    send_key_state(c, 0);
 }
 
 static void ui_commit(void) {
@@ -3635,6 +3650,7 @@ static DWORD WINAPI ui_watcher_thread(LPVOID p) {
             DeleteFileA("C:\\wt_eraser");
             g_eraser = v ? 1 : 0;
             ms_log("ERASER forced %d", g_eraser);
+            send_key_state('e', g_eraser);
         }
         if (!g_ui_hwnd && !g_ui_starting &&
             GetFileAttributesA("C:\\wt_ui") != INVALID_FILE_ATTRIBUTES) {

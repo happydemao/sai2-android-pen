@@ -39,7 +39,7 @@ public final class PenBridge {
 
     private static final String TAG = "SaiPen";
     /* 默认关闭逐事件写文件；诊断时改 true。 */
-    private static final boolean DEBUG_LOG = false;
+    private static final boolean DEBUG_LOG = true;   /* enabled for the pen-button diagnosis */
     private static final int PORT = 47800;
     private static final int PMAX = 4095;
     /* 发送给 wintab32.dll 的坐标用 8 倍定点：协议里 x/w、y/h 只取比例，
@@ -405,6 +405,11 @@ B64_32_2
             final int sx = xys[0], sy = xys[1];
 
             // 诊断：只对 DOWN 记录一次原始/变换后坐标，确认为什么画笔会贴边
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP) {
+                flog("BTN act=" + action + " btn=0x" + Integer.toHexString(ev.getButtonState())
+                        + " tool=" + ev.getToolType(pi) + " idx=" + pi + "/" + ev.getPointerCount()
+                        + " eraser=" + (ev.getToolType(pi) == MotionEvent.TOOL_TYPE_ERASER || barrelDown(ev)));
+            }
             if (action == MotionEvent.ACTION_DOWN) {
                 flog("MAP view=" + (int) ev.getX(pi) + "," + (int) ev.getY(pi)
                         + " raw=" + (int) ev.getRawX() + "," + (int) ev.getRawY()
@@ -575,10 +580,10 @@ B64_32_2
 
     private static void flog(String s) {
         if (!DEBUG_LOG) return;
-        if (logCount > 200) return;
+        if (logCount > 400) return;
         try {
             if (logWriter == null) {
-                logWriter = new java.io.FileWriter("/data/data/com.winlator/files/pb.log", false);
+                logWriter = new java.io.FileWriter("/data/data/lator.forsai/files/pb.log", false);
             }
             logWriter.write(s + "\n");
             logWriter.flush();
