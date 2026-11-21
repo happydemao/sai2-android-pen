@@ -326,3 +326,32 @@ wt_paste（CF_DIB）◄──  wt_paste.bin  ◄──────────�
 3. 交互：工具栏（五种模式、半径、强度）+ 画布拖动采样 + 叠加窗预览。
 4. 多图层：先做「只显示目标层 → 复制 → 液化 → 粘贴」的图层隔离流程，
    文件夹/选区/蒙版在此基础上扩展。
+
+## 五种模式的引擎单测（2026-11-22 00:32）
+
+`liquify/engine/lq_test.c` 是纯 C 单测，不依赖 Wine/设备：
+
+```bash
+cc -O2 -std=c99 -D_DARWIN_C_SOURCE -o /tmp/lq_test \
+   liquify/engine/lq.c liquify/engine/lq_test.c -lm
+/tmp/lq_test
+```
+
+```
+forward      PASS   cx 104.5 -> 113.5 (dx 9.0)
+bloat        PASS   cx 104.5 -> 107.7
+pinch        PASS   cx 104.5 -> 102.7
+twirl_cw     PASS   y 127.5 -> 146.4      # 屏幕 y 向下，顺时针 = y 增大
+twirl_ccw    PASS   y 127.5 -> 108.8
+smooth       PASS   pure red 100 -> 0
+idempotent   PASS   flush twice
+undo         PASS   restores snapshot
+ALL PASS (0 failures)
+```
+
+**这轮单测抓到一个真 bug**：`LQ_TWIRL_CW` 的实现方向反了。
+屏幕坐标 y 向下，`sample = R(+ang)·(p-C)` 会让内容逆时针转；
+现在 CW 用负角，并加了「右→下 = 顺时针」的方向断言。
+
+bloat/pinch 的位移量随步数饱和（内容被推出笔刷半径后质心指标失效），
+所以单测只用 3 步验证方向，不验证幅度。

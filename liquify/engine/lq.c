@@ -204,7 +204,12 @@ void lq_apply(lq_ctx *c, lq_mode mode, float x0, float y0, float x1, float y1,
             case LQ_TWIRL_CCW: {
                 float len = sqrtf(ddx * ddx + ddy * ddy);
                 if (len < 0.5f) break;
-                float ang = 0.35f * w * (mode == LQ_TWIRL_CW ? 1.0f : -1.0f);
+                /* Screen space is y-down, so a *clockwise* visual swirl needs
+                 * the sample rotated by a negative angle: the content from
+                 * -ang lands at p, i.e. content turns clockwise. The first
+                 * version had the two directions swapped, which the native
+                 * test now pins down. */
+                float ang = 0.35f * w * (mode == LQ_TWIRL_CW ? -1.0f : 1.0f);
                 float cs = cosf(ang), sn = sinf(ang);
                 /* sample = R(ang) * (p - C), so the content appears to rotate
                  * by -ang. Field stores sample - p. */
