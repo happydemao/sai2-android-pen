@@ -37,12 +37,30 @@ SAI 的笔迹点从 WinTab DLL 拿，不依赖鼠标移动，所以：
 
 UDP 发送在独立线程，UI 线程只入队，不阻塞。
 
+## 卡顿时的稀疏修正（0.3.18）
+
+输入批处理之后，如果 SAI 本身跟不上，DLL 的 conflation 会在积压超过 3 包时
+开始丢中间点，线条就变稀。0.3.18：
+
+- `wintab32.c` 的 `POST_WINDOW` 从 3 提到 **240**（ring 256），积压时优先保留
+  点，而不是优先压延迟；
+- `PenBridge` 的笔样本队列上限从 512 提到 **4096**，卡顿时不丢历史点；
+- 只有积压超过 240 包才重新合并，避免低延迟路径完全失效。
+
+## 大核绑定（0.3.18）
+
+新增 `CoreTuner`：
+
+- 读 `/sys/devices/system/cpu/cpu*/cpu_capacity`，低于最快核 60% 的算慢核；
+- 每秒读 `/proc/<sai-pid>/task/*/stat` 的 utime/stime；
+- 只累计笔尖接触期间（`PenBridge.isDrawingRecently()`）的 CPU；
+- 按负载挑真正干活的线程，总负载不超过快核数 × 0.9，避免全塞进 2 个大核；
+- 用 `taskset -pc <mask> <tid>` 绑定，失败再试 `taskset -p`；
+- 每秒重绑一次，防止 Wine 在 SAI 窗口出现时重置亲和性。
+
+日志写到 `/data/data/com.winlator/files/pb_perf.log`。如果设备没有 `taskset`
+或没有大小核信息，会自动跳过，不影响画笔。
+
 ## 还没做的
 
-参考实现还会：
-
-- 用 `/sys/.../cpu_capacity` 找慢核；
-- 统计落笔期间 SAI 各线程 CPU，把真正干活的线程 `taskset` 到快核；
 - 悬停静止时每 50 ms 补一个 pressure 0 保持笔刷光标。
-
-这些属于下一步优化，当前先落地输入批处理。
