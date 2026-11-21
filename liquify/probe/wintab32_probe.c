@@ -1764,6 +1764,110 @@ static volatile int g_needle_ready;
 static unsigned char g_needle[256];
 static volatile unsigned long g_blit_count;
 
+/* Ring of recent presents. The full-canvas DIB we latch is only refreshed by
+ * whole-canvas blits, while a stroke repaints dirty rectangles; without this
+ * history it looks as if nothing repaints at all during drawing. */
+typedef struct {
+    unsigned long long bits;
+    int w, h, stride, bpp, x, y, cx, cy, sx, sy, start, lines;
+    unsigned long long dst;
+} BlitRec;
+#define BLIT_HIST 96
+static BlitRec g_blit_hist[BLIT_HIST];
+static volatile int g_blit_hist_n;
+static volatile int g_blit_hist_need;
+
+/* ---- caller stack sampling (C:\wt_stack) --------------------------------
+ * SetDIBitsToDevice is reached from a handful of places inside sai2.exe, so
+ * the immediate return address only says "who presents". What decides the
+ * plugin architecture is "who composites": the frames above. Winlator/Box64
+ * gives us no usable hardware breakpoints, so walk the raw stack upward and
+ * keep only words that (a) point into sai2.exe's image and (b) are preceded
+ * by a call encoding. Everything else on the stack is locals and false hits.
+ */
+static void ms_log(const char *fmt, ...);
+static volatile int g_want_stack;
+static volatile int g_stack_ready;
+static volatile unsigned long long g_stack_bits;
+static volatile unsigned long long g_stack_ret;
+static volatile unsigned long long g_stack_base;
+static volatile int g_stack_len;
+static unsigned char g_stack_copy[16384];
+
+static int probe_image_range(unsigned long long *base, unsigned long long *end) {
+    HMODULE exe = GetModuleHandleA(NULL);
+    if (!exe) return 0;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)exe;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)((BYTE*)exe + dos->e_lfanew);
+    *base = (unsigned long long)(uintptr_t)exe;
+    *end = *base + nt->OptionalHeader.SizeOfImage;
+    return 1;
+}
+
+/* Runs inside the paint path: copy a window of the caller stack into a static
+ * buffer and nothing else. Parsing and file output happen later, on the scan
+ * thread, because anything slow here stalls the canvas just like the old
+ * per-event logging did. */
+static void stack_capture(void) {
+    unsigned char anchor = 0;
+    unsigned long long start = (unsigned long long)(uintptr_t)&anchor & ~0xFFFull;
+    g_stack_base = start;
+    g_stack_ret = (unsigned long long)(uintptr_t)__builtin_return_address(0);
+    g_stack_ready = 0;
+    int len = 0;
+    while (len < (int)sizeof g_stack_copy) {
+        unsigned long long a = start + (unsigned long long)len;
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPCVOID)(uintptr_t)a, &mbi, sizeof mbi)) break;
+        if (mbi.State != MEM_COMMIT) break;
+        if (mbi.Protect & PAGE_GUARD) break;
+        if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
+                             PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)))
+            break;
+        unsigned long long region_end =
+            (unsigned long long)(uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        int chunk = (int)(region_end - a);
+        if (chunk > (int)sizeof g_stack_copy - len) chunk = (int)sizeof g_stack_copy - len;
+        if (chunk <= 0) break;
+        memcpy(g_stack_copy + len, (void*)(uintptr_t)a, (size_t)chunk);
+        len += chunk;
+    }
+    g_stack_len = len;
+    g_stack_ready = 1;
+}
+
+static int looks_like_call_site(unsigned long long v) {
+    const unsigned char *p = (const unsigned char*)(uintptr_t)v;
+    if (p[-5] == 0xE8) return 1;                                  /* call rel32 */
+    if (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) return 1;        /* call r/m64 */
+    if (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) return 1;        /* call [rip+x] */
+    return 0;
+}
+
+/* Scan thread: turn the copied stack window into a readable frame list. */
+static void stack_report(void) {
+    unsigned long long base = 0, end = 0;
+    if (!probe_image_range(&base, &end)) return;
+    FILE *f = fopen("C:\\wt_stack.log", "wb");
+    if (!f) return;
+    fprintf(f, "immediate_ret=%p rva=%llx bits=%p window=%p+%d\n",
+            (void*)(uintptr_t)g_stack_ret, g_stack_ret - base,
+            (void*)(uintptr_t)g_stack_bits, (void*)(uintptr_t)g_stack_base, g_stack_len);
+    int n = 0;
+    for (int off = 0; off + 8 <= g_stack_len; off += 8) {
+        unsigned long long v;
+        memcpy(&v, g_stack_copy + off, 8);
+        if (v < base + 8 || v >= end) continue;
+        if (!looks_like_call_site(v)) continue;
+        fprintf(f, "frame +%04x %p rva=%llx\n", off, (void*)(uintptr_t)v, v - base);
+        if (++n >= 60) break;
+    }
+    fprintf(f, "frames=%d\n", n);
+    fclose(f);
+    ms_log("STACK captured %d bytes, %d candidate frames -> C:\\wt_stack.log",
+           g_stack_len, n);
+}
+
 static void gdi_dump_canvas(void) {
     void *bits = g_cv_bits;
     int w = g_cv_w, h = g_cv_h, stride = g_cv_stride, bpp = g_cv_bpp;
@@ -1833,6 +1937,22 @@ static int WINAPI probe_SetDIBitsToDevice(HDC hdc, int x, int y, DWORD cx, DWORD
         int w = bi->bmiHeader.biWidth, h = bi->bmiHeader.biHeight;
         if (h < 0) h = -h;
         if (w >= 512 && h >= 512) {
+            {
+                int idx = g_blit_hist_n;
+                if (idx < BLIT_HIST) g_blit_hist_n = idx + 1;
+                else idx = BLIT_HIST - 1;
+                if (g_blit_hist_n >= BLIT_HIST) {
+                    memmove(g_blit_hist, g_blit_hist + 1,
+                            sizeof(BlitRec) * (BLIT_HIST - 1));
+                    idx = BLIT_HIST - 1;
+                }
+                BlitRec *r = &g_blit_hist[idx];
+                r->bits = (unsigned long long)(uintptr_t)bits;
+                r->w = w; r->h = h; r->stride = 0; r->bpp = bi->bmiHeader.biBitCount;
+                r->x = x; r->y = y; r->cx = (int)cx; r->cy = (int)cy;
+                r->sx = sx; r->sy = sy; r->start = (int)start; r->lines = (int)lines;
+                r->dst = (unsigned long long)(uintptr_t)WindowFromDC(hdc);
+            }
             g_cv_bits = (void*)bits; g_cv_w = w; g_cv_h = h;
             g_cv_stride = bi->bmiHeader.biSizeImage ? bi->bmiHeader.biSizeImage
                                                     : ((w * bi->bmiHeader.biBitCount + 31) / 32) * 4;
@@ -1865,6 +1985,12 @@ static int WINAPI probe_SetDIBitsToDevice(HDC hdc, int x, int y, DWORD cx, DWORD
                     gdi_flush();
                 }
                 (void)rx;
+            }
+            if (g_want_stack) {
+                g_want_stack = 0;
+                g_stack_bits = (unsigned long long)(uintptr_t)bits;
+                gdi_log("STACK captured on canvas present dst=%s bits=%p", gdi_class_of(hdc), bits);
+                stack_capture();
             }
             if (g_want_capture) {
                 g_want_capture = 0;
@@ -2004,7 +2130,7 @@ static volatile int g_watch_hits;
 static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode != STATUS_GUARD_PAGE_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
-    if (g_watch_hits >= 8) return EXCEPTION_CONTINUE_SEARCH;
+    if (g_watch_hits >= 24) return EXCEPTION_CONTINUE_SEARCH;
     unsigned __int64 fault = (unsigned __int64)(uintptr_t)er->ExceptionInformation[1];
     HMODULE mod = NULL;
     char name[MAX_PATH] = "";
@@ -2012,13 +2138,43 @@ static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
                            (LPCSTR)(uintptr_t)er->ExceptionAddress, &mod) && mod)
         GetModuleFileNameA(mod, name, (int)sizeof name);
     HMODULE exe = GetModuleHandleA(NULL);
-    ms_log("WATCH hit #%d fault=%p addr=%p rip=%p mod=%s(%p)+%llx",
+    CONTEXT *c = ep->ContextRecord;
+    unsigned long long *sp = (unsigned long long*)(uintptr_t)c->Rsp;
+    ms_log("WATCH hit #%d fault=%p addr=%p rip=%p mod=%s(%p)+%llx rdi=%llx rsi=%llx "
+           "rcx=%llx rdx=%llx r8=%llx r9=%llx rsp=%llx ret=%llx [rsp+8]=%llx "
+           "[rsp+10]=%llx [rsp+18]=%llx",
            g_watch_hits, (void*)(uintptr_t)fault, (void*)(uintptr_t)er->ExceptionAddress,
-           (void*)(uintptr_t)ep->ContextRecord->Rip,
+           (void*)(uintptr_t)c->Rip,
            name[0] ? name : "?", (void*)mod,
-           (unsigned long long)((unsigned __int64)(uintptr_t)ep->ContextRecord->Rip
-                                - (unsigned __int64)(uintptr_t)mod));
+           (unsigned long long)((unsigned __int64)(uintptr_t)c->Rip
+                                - (unsigned __int64)(uintptr_t)mod),
+           (unsigned long long)c->Rdi, (unsigned long long)c->Rsi,
+           (unsigned long long)c->Rcx, (unsigned long long)c->Rdx,
+           (unsigned long long)c->R8, (unsigned long long)c->R9,
+           (unsigned long long)c->Rsp,
+           (unsigned long long)(sp ? sp[0] : 0),
+           (unsigned long long)(sp ? sp[1] : 0),
+           (unsigned long long)(sp ? sp[2] : 0),
+           (unsigned long long)(sp ? sp[3] : 0));
     (void)exe;
+    /* Raw stack window: the faulting instruction is inside a shared row-copy
+     * helper, so the interesting caller is one frame up and can be recovered
+     * offline by validating call endings (see pe_dis.py chain). */
+    {
+        char line[1024]; int len = 0;
+        unsigned long long sbase = (unsigned long long)c->Rsp;
+        len += _snprintf(line + len, sizeof line - (size_t)len, "STACKBASE %llx", sbase);
+        MEMORY_BASIC_INFORMATION q;
+        int ok = VirtualQuery((LPCVOID)(uintptr_t)sbase, &q, sizeof q) &&
+                 q.State == MEM_COMMIT && !(q.Protect & PAGE_GUARD);
+        if (ok)
+            for (int i = 0; i < 48 && len < (int)sizeof line - 24; ++i) {
+                unsigned long long v =
+                    ((volatile unsigned long long*)(uintptr_t)(sbase + (unsigned)i * 8))[0];
+                len += _snprintf(line + len, sizeof line - (size_t)len, " %llx", v);
+            }
+        ms_log("%s", line);
+    }
     ++g_watch_hits;
     /* One-shot: make the page writable again so SAI is not stuck faulting. */
     DWORD old;
@@ -2042,6 +2198,26 @@ static unsigned __int64 fnv1a(const unsigned char *p, size_t n) {
     unsigned __int64 h = 1469598103934665603ull;
     for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
     return h;
+}
+
+/* One-off proof that PAGE_GUARD + VEH works under Box64/Wine. Arming the real
+ * canvas DIB is pointless until this control experiment passes: if a write to
+ * our own guarded page produces no VEH hit, a missed canvas hit means nothing.
+ */
+static void veh_control_test(void) {
+    void *p = VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!p) { ms_log("VEHTEST: VirtualAlloc failed"); return; }
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+    g_watch_addr = (unsigned __int64)(uintptr_t)p;
+    g_watch_hits = 0;
+    DWORD old = 0;
+    int armed = 0;
+    if (g_veh && VirtualProtect(p, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old)) armed = 1;
+    ms_log("VEHTEST: page=%p armed=%d", p, armed);
+    volatile unsigned int *w = (volatile unsigned int*)p;
+    *w = 0x12345678u;
+    ms_log("VEHTEST: after write value=%08x hits=%d", *w, g_watch_hits);
+    VirtualFree(p, 0, MEM_RELEASE);
 }
 
 static void snap_collect(void) {
@@ -2106,6 +2282,169 @@ static void snap_diff(void) {
     }
     ms_log("diff done: %d chunks changed of %d, %d dumped", changed, g_snap_n, dumps);
     free(buf);
+}
+
+/* ---- deterministic mouse strokes (C:\wt_mouse.txt) ----------------------
+ * adb input reaches Winlator's touch layer, not Wine's mouse queue: clicks
+ * land on dialogs but a drag on the canvas child never becomes
+ * WM_LBUTTONDOWN + WM_MOUSEMOVE, which is why the earlier diff experiment
+ * changed no document pixels. Injecting through mouse_event from inside the
+ * process produces a real mouse sequence SAI has to treat like a pen drag.
+ *
+ * File format: "x0 y0 x1 y1 steps delay_ms"
+ */
+static void inject_stroke(int x0, int y0, int x1, int y1, int steps, int delay) {
+    if (steps < 2) steps = 2;
+    if (steps > 2000) steps = 2000;
+    if (delay < 0) delay = 0;
+    if (delay > 50) delay = 50;
+    SetCursorPos(x0, y0);
+    Sleep(30);
+    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+    Sleep((DWORD)delay);
+    for (int i = 1; i <= steps; ++i) {
+        int x = x0 + (x1 - x0) * i / steps;
+        int y = y0 + (y1 - y0) * i / steps;
+        SetCursorPos(x, y);
+        Sleep((DWORD)delay);
+    }
+    Sleep(30);
+    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+    ms_log("mouse stroke (%d,%d)->(%d,%d) steps=%d delay=%d", x0, y0, x1, y1,
+           steps, delay);
+}
+
+static void do_mouse_file(void) {
+    FILE *cf = fopen("C:\\wt_mouse.txt", "r");
+    if (!cf) return;
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0, steps = 40, delay = 8;
+    int n = fscanf(cf, "%d %d %d %d %d %d", &x0, &y0, &x1, &y1, &steps, &delay);
+    fclose(cf);
+    DeleteFileA("C:\\wt_mouse.txt");
+    if (n >= 4) inject_stroke(x0, y0, x1, y1, steps, delay);
+}
+
+/* Arm PAGE_GUARD inside the canvas DIB that the last present handed us.
+ * File: "<offset_hex> <npages>". Keeping the offset rather than an absolute
+ * address means the same trigger survives SAI re-creating the DIB. */
+static void arm_canvas_guard(unsigned int off, int np) {
+    if (!g_cv_bits || !g_cv_stride) { ms_log("GUARD: no canvas present seen yet"); return; }
+    unsigned long long a = (unsigned long long)(uintptr_t)g_cv_bits + off;
+    a &= ~0xFFFull;
+    if (np < 1) np = 1;
+    if (np > 64) np = 64;
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+    g_watch_addr = a;
+    g_watch_hits = 0;
+    DWORD old;
+    int armed = 0;
+    for (int i = 0; i < np; ++i)
+        if (VirtualProtect((LPVOID)(uintptr_t)(a + (unsigned long long)i * 0x1000),
+                           0x1000ull, PAGE_READWRITE | PAGE_GUARD, &old))
+            ++armed;
+    ms_log("GUARD armed %d page(s) at %llx (dib=%p +%x, %dx%d stride %d)",
+           armed, a, g_cv_bits, off, g_cv_w, g_cv_h, g_cv_stride);
+}
+
+/* Does PAGE_GUARD actually fire on a CreateDIBSection view? A heap page
+ * worked in the VEHTEST, but DIB bits are section-backed and Wine may map the
+ * same pages more than once, so prove it on the real canvas before trusting a
+ * negative result from the compositor watch. */
+static void guard_poke_test(unsigned int off) {
+    if (!g_cv_bits) { ms_log("GUARDPOKE: no canvas present seen yet"); return; }
+    unsigned char *p = (unsigned char*)g_cv_bits + off;
+    p = (unsigned char*)((uintptr_t)p & ~0xFFFull);
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+    g_watch_addr = (unsigned __int64)(uintptr_t)p;
+    g_watch_hits = 0;
+    DWORD old = 0;
+    int armed = VirtualProtect(p, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old) ? 1 : 0;
+    unsigned char before = *p;
+    *p = (unsigned char)(before ^ 0x5A);
+    unsigned char after = *p;
+    *p = before;
+    ms_log("GUARDPOKE: page=%p armed=%d read=%02x wrote=%02x hits=%d",
+           p, armed, before, after, g_watch_hits);
+}
+
+/* Guard the entire canvas DIB instead of guessing which rows a stroke lands
+ * on. One VirtualProtect call, 36 MB of pages; the first touch anywhere tells
+ * us whether SAI's own code writes the DIB at all, and from what RIP. */
+static void guard_whole_dib(void) {
+    if (!g_cv_bits || !g_cv_stride || !g_cv_h) { ms_log("GUARDWHOLE: no canvas"); return; }
+    size_t len = (size_t)g_cv_stride * (size_t)g_cv_h;
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+    g_watch_addr = (unsigned __int64)(uintptr_t)g_cv_bits;
+    g_watch_hits = 0;
+    DWORD old = 0;
+    int armed = VirtualProtect(g_cv_bits, len, PAGE_READWRITE | PAGE_GUARD, &old) ? 1 : 0;
+    ms_log("GUARDWHOLE: dib=%p len=%zu armed=%d (stride %d h %d)",
+           g_cv_bits, len, armed, g_cv_stride, g_cv_h);
+}
+
+/* Find every "surface" object: {+8 w, +0xc h, +0x10 stride bytes, +0x18 bits,
+ * +0x20 second buffer}. The present path proved this layout with an 800x800
+ * view surface, so scanning for it is the fastest way to discover the
+ * document-resolution layer buffers we actually need to edit.
+ *
+ * Candidates are logged with a pixel signature (how many f8f8f8 paper pixels
+ * in the first 64 KB) so view surfaces, layer surfaces and scratch buffers can
+ * be told apart without dumping tens of megabytes. */
+static void find_surfaces(void) {
+    FILE *f = fopen("C:\\wt_surfaces.log", "wb");
+    if (!f) return;
+    HANDLE self = GetCurrentProcess();
+    unsigned char *chunk = (unsigned char*)malloc(1u << 20);
+    unsigned char *sig = (unsigned char*)malloc(0x10000);
+    if (!chunk || !sig) { free(chunk); free(sig); fclose(f); return; }
+    fprintf(f, "scan start\n");
+    unsigned long long addr = 0x10000;
+    int cands = 0;
+    while (addr < 0x7FFFFFFF0000ull) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPCVOID)(uintptr_t)addr, &mbi, sizeof mbi)) break;
+        unsigned long long base = (unsigned long long)(uintptr_t)mbi.BaseAddress;
+        unsigned long long size = (unsigned long long)mbi.RegionSize;
+        if (size == 0) break;
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) &&
+            !(mbi.Protect & PAGE_GUARD)) {
+            for (unsigned long long off = 0; off < size; off += (1u << 20)) {
+                SIZE_T want = (SIZE_T)((size - off > (1u << 20)) ? (1u << 20) : (size - off));
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)(base + off), chunk, want, &got) || got < 0x40)
+                    continue;
+                for (SIZE_T i = 0; i + 0x30 <= got; i += 8) {
+                    int w, h, stride;
+                    unsigned long long bits;
+                    memcpy(&w, chunk + i + 8, 4);
+                    memcpy(&h, chunk + i + 0xc, 4);
+                    memcpy(&stride, chunk + i + 0x10, 4);
+                    memcpy(&bits, chunk + i + 0x18, 8);
+                    if (w < 64 || w > 8192 || h < 64 || h > 8192) continue;
+                    if (stride < w * 4 || stride > w * 4 + 0x1000) continue;
+                    if (bits < 0x10000 || bits > 0x7FFFFFFF0000ull) continue;
+                    SIZE_T g2 = 0;
+                    if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)bits, sig, 0x10000, &g2) || g2 < 0x10000)
+                        continue;
+                    int paper = 0, ink = 0;
+                    for (int k = 0; k + 4 <= 0x10000; k += 4) {
+                        int b = sig[k], g = sig[k+1], r = sig[k+2];
+                        if (b >= 0xF0 && g >= 0xF0 && r >= 0xF0) ++paper;
+                        else if (b <= 0x10 && g <= 0x10 && r <= 0x10) ++ink;
+                    }
+                    if (paper + ink < 500) continue;
+                    ++cands;
+                    fprintf(f, "SURFACE obj=%llx w=%d h=%d stride=%d bits=%llx "
+                               "paper=%d ink=%d\n",
+                            base + off + i, w, h, stride, bits, paper, ink);
+                }
+            }
+        }
+        addr = base + size;
+    }
+    fprintf(f, "done candidates=%d\n", cands);
+    free(chunk); free(sig); fclose(f);
 }
 
 static DWORD WINAPI memscan_thread(LPVOID p) {
@@ -2180,6 +2519,12 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
             snap_diff();
             continue;
         }
+        if (g_stack_ready) {
+            g_stack_ready = 0;
+            stack_report();
+            gdi_flush();
+            continue;
+        }
         if (GetFileAttributesA("C:\\wt_dump.txt") != INVALID_FILE_ATTRIBUTES) {
             FILE *cf = fopen("C:\\wt_dump.txt", "r");
             unsigned long long a = 0; unsigned int len = 0;
@@ -2197,6 +2542,64 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
                 }
                 free(bf);
             }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_surfaces") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_surfaces");
+            find_surfaces();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_guard_whole") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_guard_whole");
+            guard_whole_dib();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_guard_poke") != INVALID_FILE_ATTRIBUTES) {
+            FILE *cf = fopen("C:\\wt_guard_poke", "r");
+            unsigned int off = 0;
+            if (cf) { if (fscanf(cf, "%x", &off) != 1) off = 0; fclose(cf); }
+            DeleteFileA("C:\\wt_guard_poke");
+            guard_poke_test(off);
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_blits") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_blits");
+            FILE *bf = fopen("C:\\wt_blits.log", "wb");
+            if (bf) {
+                fprintf(bf, "blits=%lu history=%d\n", g_blit_count, g_blit_hist_n);
+                for (int i = 0; i < g_blit_hist_n; ++i) {
+                    BlitRec *r = &g_blit_hist[i];
+                    fprintf(bf, "bits=%p dst=%p bmp=%dx%d rect=(%d,%d %dx%d) "
+                                "src=(%d,%d) start=%d lines=%d bpp=%d\n",
+                            (void*)(uintptr_t)r->bits, (void*)(uintptr_t)r->dst,
+                            r->w, r->h, r->x, r->y, r->cx, r->cy,
+                            r->sx, r->sy, r->start, r->lines, r->bpp);
+                }
+                fclose(bf);
+            }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_guard_canvas") != INVALID_FILE_ATTRIBUTES) {
+            FILE *cf = fopen("C:\\wt_guard_canvas", "r");
+            unsigned int off = 0; int np = 1;
+            if (cf) { if (fscanf(cf, "%x %d", &off, &np) != 2) np = 1; fclose(cf); }
+            DeleteFileA("C:\\wt_guard_canvas");
+            arm_canvas_guard(off, np);
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_vehtest") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_vehtest");
+            veh_control_test();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_mouse.txt") != INVALID_FILE_ATTRIBUTES) {
+            do_mouse_file();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_stack") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_stack");
+            g_want_stack = 1;
+            gdi_log("STACK armed; waiting for the next canvas present");
             continue;
         }
         if (GetFileAttributesA("C:\\wt_write") != INVALID_FILE_ATTRIBUTES) {

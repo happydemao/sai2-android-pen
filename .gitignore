@@ -34,3 +34,10 @@ aaa教程用*/
 .DS_Store
 ._*
 Thumbs.db
+
+# ---- 液化插件本地分析环境 ----
+.pylibs/
+liquify/notes/bin/
+liquify/notes/*.log
+liquify/notes/*.bmp
+liquify/notes/*.bin
