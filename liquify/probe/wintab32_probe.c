@@ -3808,12 +3808,12 @@ static DWORD WINAPI hotkey_thread(LPVOID p) {
 /* The Android-side button drops C:\wt_ui into the container; this watcher
  * turns it into an overlay. It runs from the first WTOpen, independent of the
  * GDI capture hooks, so the plugin can be opened without any debug switches. */
+/* Liquify is offline for this release: keep the entry points compiled but do
+ * not register the hotkey or the app-button watcher, so no overlay can appear.
+ * The pen-pressure bridge is untouched. */
 static void ensure_plugin_threads(void) {
     static LONG once = 0;
-    if (InterlockedCompareExchange(&once, 1, 0) == 0) {
-        CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
-        CreateThread(NULL, 0, ui_watcher_thread, NULL, 0, NULL);
-    }
+    (void)once;
 }
 
 static DWORD WINAPI ui_watcher_thread(LPVOID p) {

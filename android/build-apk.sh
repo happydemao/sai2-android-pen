@@ -59,11 +59,14 @@ dec = pathlib.Path(sys.argv[1])
 p = dec / "smali/com/winlator/widget/TouchpadView.smali"
 s = p.read_text()
 needle = "    invoke-static {p3, p4}, Lcom/winlator/sai/PenBridge;->configure(II)V\n"
-add = "    invoke-static {}, Lcom/winlator/sai/LiquifyServer;->start()V\n"
-add2 = "    invoke-static {p0}, Lcom/winlator/sai/LiquifyButton;->install(Landroid/view/View;)V\n"
+# Liquify is offline for this release (the alignment is not reliable yet).
+# The sources stay in the tree, the hooks are simply not injected.
+add = ""
+add2 = ""
 if add.strip() not in s:
     assert needle in s, "configure call site not found"
-    s = s.replace(needle, needle + "\n" + add + add2, 1)
+    if add or add2:
+        s = s.replace(needle, needle + "\n" + add + add2, 1)
     p.write_text(s)
     print("injected into", p.name)
 else:
@@ -76,8 +79,7 @@ env HOME=/private/tmp/apkhome java -jar "$APKTOOL" b -o "$WORK/rebuilt.apk" "$WO
 echo "== javac + d8"
 mkdir -p "$WORK/classes" "$WORK/dex"
 "$JDK/bin/javac" -nowarn -source 8 -target 8 -bootclasspath "$AJAR" \
-    -d "$WORK/classes" "$HERE/LiquifyWarp.java" "$HERE/LiquifyServer.java" \
-    "$HERE/LiquifyButton.java" "$HERE/PenBridge.java" "$HERE/CoreTuner.java"
+    -d "$WORK/classes" "$HERE/PenBridge.java" "$HERE/CoreTuner.java"
 "$BT/d8" --release --min-api 26 --lib "$AJAR" --output "$WORK/dex" \
     $(find "$WORK/classes" -name '*.class')
 
