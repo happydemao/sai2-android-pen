@@ -5,6 +5,7 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.View;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -71,10 +72,38 @@ public final class LiquifyButton {
             lp.topMargin = (int) (84 * d);
             lp.gravity = Gravity.TOP | Gravity.LEFT;
 
-            b.setOnClickListener(new View.OnClickListener() {
+            /* Draggable: a drag moves the button, a tap opens the overlay. */
+            b.setOnTouchListener(new View.OnTouchListener() {
+                private float downX, downY;
+                private int startLeft, startTop;
+                private boolean dragging;
+
                 @Override
-                public void onClick(View v) {
-                    trigger();
+                public boolean onTouch(View v, MotionEvent e) {
+                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            downX = e.getRawX(); downY = e.getRawY();
+                            startLeft = lp.leftMargin; startTop = lp.topMargin;
+                            dragging = false;
+                            return true;
+                        case MotionEvent.ACTION_MOVE: {
+                            int dx = (int) (e.getRawX() - downX);
+                            int dy = (int) (e.getRawY() - downY);
+                            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) dragging = true;
+                            if (dragging) {
+                                int w = v.getRootView().getWidth(), h = v.getRootView().getHeight();
+                                lp.leftMargin = Math.max(0, Math.min(w - v.getWidth(), startLeft + dx));
+                                lp.topMargin = Math.max(0, Math.min(h - v.getHeight(), startTop + dy));
+                                v.setLayoutParams(lp);
+                            }
+                            return true;
+                        }
+                        case MotionEvent.ACTION_UP:
+                            if (!dragging) trigger();
+                            return true;
+                    }
+                    return false;
                 }
             });
             root.addView(b, lp);

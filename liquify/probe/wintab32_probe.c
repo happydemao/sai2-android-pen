@@ -3041,12 +3041,18 @@ static HWND ui_canvas_hwnd(void) {
 
 static void ui_update_window(void);
 static void ui_render_rect(int dx0, int dy0, int dx1, int dy1);
+static void ui_draw_bar(void);
+static void ui_draw_status(void);
 static void ui_commit(void);
 static void ui_close(void);
 
 static int g_ui_w, g_ui_h, g_ui_x, g_ui_y;   /* g_ui_w/h = visible paper size */
 static float g_ui_sc = 1.0f;                  /* doc px -> surface px */
 static float g_ui_offx, g_ui_offy;            /* doc coords at surface (0,bar+h) */
+static int g_doc_offx, g_doc_offy;            /* content offset inside the document */
+static int g_paper_x, g_paper_y;              /* paper top-left, screen coords */
+static int g_paper_w, g_paper_h;              /* paper size on screen */
+static int g_cv_screen_x, g_cv_screen_y;      /* canvas client origin, screen coords */
 static volatile int g_ui_starting;
 #define UI_BAR_H 34
 static int g_ui_clicks;                        /* taps seen, so a tap can act */
@@ -3057,6 +3063,86 @@ static const char *UI_MODES[6] = { "FWD", "BLT", "PNC", "CW", "CCW", "SMO" };
 static int g_ui_merge;   /* merge into the layer below after commit */
 
 /* current radius shown on the paper so the size is always visible */
+/* Find the captured content inside the canvas viewport so a trimmed copy can
+ * be put back where it came from. Returns 1 on a confident match and fills the
+ * content offset in document pixels. */
+/* The canvas child shows the paper rectangle over a uniform grey backdrop.
+ * Detect that rectangle: it is also the only way to know the real document
+ * size, since SAI trims its clipboard copy to the painted content. */
+static int g_paper_dib_x, g_paper_dib_y, g_paper_dib_w, g_paper_dib_h;
+static int ui_detect_paper(void) {
+    if (!g_cv_bits || g_cv_w < 64 || g_cv_h < 64) return 0;
+    const unsigned char *d = (const unsigned char *)g_cv_bits;
+    int bb = d[0], bg = d[1], br = d[2];
+    int x0 = -1, y0 = -1, x1 = -1, y1 = -1;
+    for (int y = 0; y < g_cv_h; y += 2) {
+        const unsigned char *row = d + (size_t)y * g_cv_stride;
+        for (int x = 0; x < g_cv_w; x += 2) {
+            const unsigned char *p = row + (size_t)x * 4;
+            int diff = abs(p[0] - bb) + abs(p[1] - bg) + abs(p[2] - br);
+            if (diff > 24) {
+                if (x0 < 0 || x < x0) x0 = x;
+                if (y0 < 0 || y < y0) y0 = y;
+                if (x > x1) x1 = x;
+                if (y > y1) y1 = y;
+            }
+        }
+    }
+    if (x0 < 0 || x1 - x0 < 32 || y1 - y0 < 32) return 0;
+    g_paper_dib_x = x0; g_paper_dib_y = y0;
+    g_paper_dib_w = x1 - x0; g_paper_dib_h = y1 - y0;
+    return 1;
+}
+
+#define LOC_N 10
+static int ui_locate_content(void) {
+    if (!g_cv_bits || !g_ui.doc || g_ui.dw < 16 || g_ui.dh < 16) return 0;
+    const int cw = g_ui.dw, ch = g_ui.dh;
+    if (cw > g_cv_w || ch > g_cv_h) return 0;
+    unsigned char cap[LOC_N * LOC_N];
+    int mean = 0, sq = 0;
+    for (int gy = 0; gy < LOC_N; ++gy) {
+        for (int gx = 0; gx < LOC_N; ++gx) {
+            int x = gx * cw / LOC_N, y = gy * ch / LOC_N;
+            const unsigned char *p = g_ui.doc + ((size_t)y * cw + x) * 4;
+            int v = (p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8;
+            cap[gy * LOC_N + gx] = (unsigned char)v;
+            mean += v; sq += v * v;
+        }
+    }
+    int n = LOC_N * LOC_N;
+    mean /= n;
+    /* a flat capture cannot be placed by matching */
+    if (sq / n - mean * mean < 16) return 0;
+
+    const unsigned char *dib = (const unsigned char *)g_cv_bits;
+    int bestx = -1, besty = -1;
+    long bestd = (long)1 << 60;
+    const int step = 6;
+    for (int vy = 0; vy + ch <= g_cv_h; vy += step) {
+        for (int vx = 0; vx + cw <= g_cv_w; vx += step) {
+            long d = 0;
+            for (int gy = 0; gy < LOC_N && d < bestd; ++gy) {
+                const unsigned char *row = dib + (size_t)(vy + gy * ch / LOC_N) * g_cv_stride;
+                for (int gx = 0; gx < LOC_N; ++gx) {
+                    const unsigned char *p = row + (size_t)(vx + gx * cw / LOC_N) * 4;
+                    int v = (p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8;
+                    int diff = v - cap[gy * LOC_N + gx];
+                    d += (long)diff * diff;
+                }
+            }
+            if (d < bestd) { bestd = d; bestx = vx; besty = vy; }
+        }
+    }
+    if (bestx < 0) return 0;
+    /* how far the best match is from the paper origin */
+    g_doc_offx = bestx - g_paper_dib_x;
+    g_doc_offy = besty - g_paper_dib_y;
+    if (g_doc_offx < 0) g_doc_offx = 0;
+    if (g_doc_offy < 0) g_doc_offy = 0;
+    return 1;
+}
+
 static void ui_draw_status(void) {
     if (!g_ui_bits) return;
     int bw = g_ui_w, bh = 16;
@@ -3100,6 +3186,15 @@ static void ui_refresh_ring(int cx, int cy) {
     int rad = (int)(g_ui.radius * g_ui_sc);
     if (rad < 3) rad = 3;
     if (g_cur_r == rad && g_cur_x == cx && g_cur_y == cy) return;
+    /* every so often repaint the whole surface: incremental erasing can leave
+     * a faint trail on slow compositors like this one */
+    static int ticks;
+    if ((++ticks % 40) == 0) {
+        ui_render_rect(0, 0, g_ui.dw - 1, g_ui.dh - 1);
+        ui_draw_bar();
+        ui_draw_status();
+        g_cur_r = -1;
+    }
     ui_erase_ring();
     ui_draw_cursor(cx, cy, rad);
     g_cur_x = cx; g_cur_y = cy; g_cur_r = rad;
@@ -3187,20 +3282,26 @@ static void ui_bar_click(int ox, int oy) {
 
 static void ui_render_rect(int dx0, int dy0, int dx1, int dy1) {
     if (!g_ui_bits || !g_ui.doc) return;
-    if (dx0 < 0) dx0 = 0;
-    if (dy0 < 0) dy0 = 0;
-    if (dx1 > g_ui.dw - 1) dx1 = g_ui.dw - 1;
-    if (dy1 > g_ui.dh - 1) dy1 = g_ui.dh - 1;
-    for (int oy = (int)((dy0 - g_ui_offy) * g_ui_sc); oy <= (int)((dy1 - g_ui_offy) * g_ui_sc); ++oy) {
-        if (oy < 0 || oy >= g_ui_h) continue;
+    /* Work in surface pixels and clear whatever falls outside the document,
+     * otherwise the brush ring leaves ghost pixels at the paper edges. */
+    int sx0 = (int)((dx0 - g_ui_offx) * g_ui_sc);
+    int sx1 = (int)((dx1 - g_ui_offx) * g_ui_sc);
+    int sy0 = (int)((dy0 - g_ui_offy) * g_ui_sc);
+    int sy1 = (int)((dy1 - g_ui_offy) * g_ui_sc);
+    if (sx0 < 0) sx0 = 0;
+    if (sy0 < 0) sy0 = 0;
+    if (sx1 > g_ui_w - 1) sx1 = g_ui_w - 1;
+    if (sy1 > g_ui_h - 1) sy1 = g_ui_h - 1;
+    for (int oy = sy0; oy <= sy1; ++oy) {
         int sy = (int)(g_ui_offy + oy / g_ui_sc);
-        if (sy < 0 || sy >= g_ui.dh) continue;
-        for (int ox = (int)((dx0 - g_ui_offx) * g_ui_sc); ox <= (int)((dx1 - g_ui_offx) * g_ui_sc); ++ox) {
-            if (ox < 0 || ox >= g_ui_w) continue;
+        for (int ox = sx0; ox <= sx1; ++ox) {
             int sx = (int)(g_ui_offx + ox / g_ui_sc);
-            if (sx < 0 || sx >= g_ui.dw) continue;
-            const unsigned char *src = g_ui.doc + ((size_t)sy * g_ui.dw + sx) * 4;
             unsigned char *dst = g_ui_bits + ((size_t)(oy + UI_BAR_H) * g_ui_w + ox) * 4;
+            if (sx < 0 || sx >= g_ui.dw || sy < 0 || sy >= g_ui.dh) {
+                dst[3] = 0;
+                continue;
+            }
+            const unsigned char *src = g_ui.doc + ((size_t)sy * g_ui.dw + sx) * 4;
             dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
         }
     }
@@ -3247,10 +3348,25 @@ static void send_plain_key(char c) {
 
 static void ui_commit(void) {
     if (!g_ui.doc) return;
+    /* A trimmed copy pasted at the origin would land in the top-left corner.
+     * Pad it back to the document coordinates it was copied from. */
+    int w = g_ui.dw, h = g_ui.dh;
+    unsigned char *img = g_ui.doc, *pad = NULL;
+    if (g_doc_offx > 0 || g_doc_offy > 0) {
+        int pw = w + g_doc_offx, ph = h + g_doc_offy;
+        pad = (unsigned char*)calloc((size_t)pw * 4 * ph, 1);
+        if (pad) {
+            for (int y = 0; y < h; ++y)
+                memcpy(pad + ((size_t)(y + g_doc_offy) * pw + g_doc_offx) * 4,
+                       g_ui.doc + (size_t)y * w * 4, (size_t)w * 4);
+            img = pad; w = pw; h = ph;
+        }
+    }
     FILE *f = fopen("C:\\wt_paste.bin", "wb");
-    if (f) { fwrite(g_ui.doc, 1, (size_t)g_ui.dw * 4 * g_ui.dh, f); fclose(f); }
+    if (f) { fwrite(img, 1, (size_t)w * 4 * h, f); fclose(f); }
     FILE *t = fopen("C:\\wt_paste.txt", "wb");
-    if (t) { fprintf(t, "%d %d", g_ui.dw, g_ui.dh); fclose(t); }
+    if (t) { fprintf(t, "%d %d", w, h); fclose(t); }
+    free(pad);
     doc_paste();
     /* the overlay owns the focus; hand it back to SAI or the Ctrl+V lands on
      * the (about to be destroyed) overlay window */
@@ -3404,8 +3520,23 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     if (pc && strchr(pc, '%') && strchr(pc, '%') < pc + 12) zoom = atoi(pc + 1);
     if (zoom <= 0 || zoom > 6400) zoom = 100;
     g_ui_sc = zoom / 100.0f;
-    int pw = (int)(w * g_ui_sc), ph = (int)(h * g_ui_sc);
-    int pl = o.x + (rc.right - pw) / 2, pt = o.y + (rc.bottom - ph) / 2;
+    g_cv_screen_x = o.x;
+    g_cv_screen_y = o.y;
+    int pw, ph, pl, pt;
+    if (ui_detect_paper()) {
+        /* the viewport knows the real paper rectangle even when the clipboard
+         * copy was trimmed to the painted content */
+        pw = g_paper_dib_w;
+        ph = g_paper_dib_h;
+        pl = o.x + g_paper_dib_x;
+        pt = o.y + g_paper_dib_y;
+        ms_log("UI: paper %dx%d at %d,%d (from viewport)", pw, ph, pl, pt);
+    } else {
+        pw = (int)(w * g_ui_sc);
+        ph = (int)(h * g_ui_sc);
+        pl = o.x + (rc.right - pw) / 2;
+        pt = o.y + (rc.bottom - ph) / 2;
+    }
     if (zoom == 100 && g_cv_cx >= 8 && g_cv_cy >= 8) {
         /* 1:1 blit: dest(x,y) shows document (sx,sy), so the paper origin is
          * exact. At other zooms the source coords are already viewport pixels
@@ -3418,12 +3549,27 @@ static DWORD WINAPI ui_thread(LPVOID p) {
             pt = qt;
         }
     }
+    g_paper_x = pl; g_paper_y = pt; g_paper_w = pw; g_paper_h = ph;
+    g_doc_offx = 0; g_doc_offy = 0;
+    int located = ui_locate_content();
+    if (located) ms_log("UI: content at %d,%d in the document", g_doc_offx, g_doc_offy);
+
     int vl = pl, vt = pt, vr = pl + pw, vb = pt + ph;
+    if (located) {
+        /* cover the content itself, not the whole paper */
+        vl = pl + (int)(g_doc_offx * g_ui_sc);
+        vt = pt + (int)(g_doc_offy * g_ui_sc);
+        vr = vl + (int)(w * g_ui_sc);
+        vb = vt + (int)(h * g_ui_sc);
+    }
     ms_log("UI: geom doc=%dx%d zoom=%d paper=%d,%d %dx%d", w, h, zoom, pl, pt, pw, ph);
-    if (vl < o.x) vl = o.x;
-    if (vt < o.y) vt = o.y;
-    if (vr > o.x + rc.right) vr = o.x + rc.right;
-    if (vb > o.y + rc.bottom) vb = o.y + rc.bottom;
+    { int l0 = vl, t0 = vt;
+      if (vl < o.x) vl = o.x;
+      if (vt < o.y) vt = o.y;
+      if (vr > o.x + rc.right) vr = o.x + rc.right;
+      if (vb > o.y + rc.bottom) vb = o.y + rc.bottom;
+      if (located) { g_doc_offx += (int)((vl - l0) / g_ui_sc); g_doc_offy += (int)((vt - t0) / g_ui_sc); }
+    }
     if (vr - vl < 32 || vb - vt < 32) {
         /* implausible geometry: fall back to the centred estimate */
         pw = (int)(w * g_ui_sc);
@@ -3687,52 +3833,10 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
             }
             continue;
         }
-        if (GetFileAttributesA("C:\\wt_poke.txt") != INVALID_FILE_ATTRIBUTES) {
-            FILE *cf = fopen("C:\\wt_poke.txt", "r");
-            unsigned long long a = 0; unsigned int len = 0;
-            if (cf) { if (fscanf(cf, "%llx %u", &a, &len) != 2) len = 0; fclose(cf); }
-            DeleteFileA("C:\\wt_poke.txt");
-            if (a && len && len <= (1u << 20)) {
-                FILE *pf = fopen("C:\\wt_poke.bin", "rb");
-                if (pf) {
-                    unsigned char *buf = (unsigned char*)malloc(len);
-                    size_t n = buf ? fread(buf, 1, len, pf) : 0;
-                    fclose(pf);
-                    if (n == len) {
-                        DWORD old;
-                        if (VirtualProtect((LPVOID)(uintptr_t)a, len, PAGE_READWRITE, &old)) {
-                            memcpy((void*)(uintptr_t)a, buf, len);
-                            VirtualProtect((LPVOID)(uintptr_t)a, len, old, &old);
-                            ms_log("poked %u bytes at %llx", len, a);
-                            if (g_cv_dst) InvalidateRect(g_cv_dst, NULL, FALSE);
-                            ms_log("invalidated canvas hwnd %p", (void*)g_cv_dst);
-                        } else {
-                            ms_log("poke protect failed at %llx", a);
-                        }
-                    } else {
-                        ms_log("poke short read %zu/%u", n, len);
-                    }
-                    free(buf);
-                }
-            }
-            continue;
-        }
         if (GetFileAttributesA("C:\\wt_invalidate") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_invalidate");
             if (g_cv_dst) InvalidateRect(g_cv_dst, NULL, TRUE);
             ms_log("invalidated canvas hwnd %p", (void*)g_cv_dst);
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_snap") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_snap");
-            snap_collect();
-            ms_log("SNAP recorded %d chunks", g_snap_n);
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_diff") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_diff");
-            ms_log("==== diff ====");
-            snap_diff();
             continue;
         }
         if (g_stack_ready) {
@@ -3805,36 +3909,6 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
             clipboard_test();
             continue;
         }
-        if (GetFileAttributesA("C:\\wt_guard_whole") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_guard_whole");
-            guard_whole_dib();
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_guard_poke") != INVALID_FILE_ATTRIBUTES) {
-            FILE *cf = fopen("C:\\wt_guard_poke", "r");
-            unsigned int off = 0;
-            if (cf) { if (fscanf(cf, "%x", &off) != 1) off = 0; fclose(cf); }
-            DeleteFileA("C:\\wt_guard_poke");
-            guard_poke_test(off);
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_blits") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_blits");
-            FILE *bf = fopen("C:\\wt_blits.log", "wb");
-            if (bf) {
-                fprintf(bf, "blits=%lu history=%d\n", g_blit_count, g_blit_hist_n);
-                for (int i = 0; i < g_blit_hist_n; ++i) {
-                    BlitRec *r = &g_blit_hist[i];
-                    fprintf(bf, "bits=%p dst=%p bmp=%dx%d rect=(%d,%d %dx%d) "
-                                "src=(%d,%d) start=%d lines=%d bpp=%d\n",
-                            (void*)(uintptr_t)r->bits, (void*)(uintptr_t)r->dst,
-                            r->w, r->h, r->x, r->y, r->cx, r->cy,
-                            r->sx, r->sy, r->start, r->lines, r->bpp);
-                }
-                fclose(bf);
-            }
-            continue;
-        }
         if (GetFileAttributesA("C:\\wt_guard_canvas") != INVALID_FILE_ATTRIBUTES) {
             FILE *cf = fopen("C:\\wt_guard_canvas", "r");
             unsigned int off = 0; int np = 1;
@@ -3850,12 +3924,6 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
         }
         if (GetFileAttributesA("C:\\wt_mouse.txt") != INVALID_FILE_ATTRIBUTES) {
             do_mouse_file();
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_stack") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_stack");
-            g_want_stack = 1;
-            gdi_log("STACK armed; waiting for the next canvas present");
             continue;
         }
         if (GetFileAttributesA("C:\\wt_write") != INVALID_FILE_ATTRIBUTES) {
