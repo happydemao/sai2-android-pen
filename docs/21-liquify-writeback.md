@@ -700,3 +700,23 @@ UI: 1600x1600 doc, paper 528x528 at 974,111, mode=forward radius=120 strength=0.
 体积：加完这段 DLL 涨到 95,744 字节，超过 94,720 的固定上限（`PenBridge` 按字节数
 校验），所以编译加了 `-fno-asynchronous-unwind-tables -fno-unwind-tables`，
 压回 93,184 字节。
+
+## 真实数位板实测通过（2026-11-22 02:20）
+
+用户在手机上接入 **WH851-545 Pen**（`getevent -pl` 里能看到 `WH851-545 Pen` + 键盘），
+在叠加层里用笔拖动画出多笔：
+
+```
+UI: down at doc 27,427
+UI: move doc 188,403
+UI: down at doc 209,297
+UI: move doc 215,388 ... (共 38 次 move)
+```
+
+截图里绿方块被笔拖着实时液化成一团——**笔 → PenBridge 合成按键 → Wine 按键状态 →
+叠加层轮询 → 实时变形**，整条链打通。
+
+这也回答了之前的疑问：PenBridge 在压力>0 时合成的 `ACTION_BUTTON_PRESS` 会让 Wine 的
+`GetAsyncKeyState(VK_LBUTTON)` 变成按下，而 adb 的 `input swipe` 不会。所以：
+- **真笔**：完整支持（拖动、实时预览）；
+- **adb 触摸**：只有 tap 能触发按钮/单击，拖拽不行（仅测试用）。
