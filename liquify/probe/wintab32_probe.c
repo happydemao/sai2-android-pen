@@ -3056,7 +3056,72 @@ static HWND g_ui_hwnd;
 static HDC g_ui_dc;
 static HBITMAP g_ui_bmp;
 static unsigned char *g_ui_bits;
-static int g_ui_w, g_ui_h, g_ui_x, g_ui_y;
+static void ui_update_window(void);
+static void ui_commit(void);
+static void ui_close(void);
+
+static int g_ui_w, g_ui_h, g_ui_x, g_ui_y;   /* g_ui_w/h = paper size */
+#define UI_BAR_H 34
+static int g_ui_clicks;                        /* taps seen, so a tap can act */
+
+static const char *UI_MODES[6] = { "FWD", "BLT", "PNC", "CW", "CCW", "SMO" };
+
+static void ui_bar_rect(int i, RECT *r) {
+    int bw = g_ui_w / 10;
+    if (bw < 24) bw = 24;
+    r->left = i * bw;
+    r->right = r->left + bw - 2;
+    r->top = 3;
+    r->bottom = UI_BAR_H - 3;
+}
+
+static void ui_draw_bar(void) {
+    HBRUSH bg = CreateSolidBrush(RGB(40, 40, 40));
+    RECT all = { 0, 0, g_ui_w, UI_BAR_H };
+    FillRect(g_ui_dc, &all, bg);
+    DeleteObject(bg);
+    SetBkMode(g_ui_dc, TRANSPARENT);
+    for (int i = 0; i < 10; ++i) {
+        RECT r; ui_bar_rect(i, &r);
+        int active = (i < 6 && i == g_ui.mode);
+        HBRUSH b = CreateSolidBrush(active ? RGB(0, 120, 215) : RGB(70, 70, 70));
+        FillRect(g_ui_dc, &r, b);
+        DeleteObject(b);
+        SetTextColor(g_ui_dc, RGB(235, 235, 235));
+        const char *label;
+        char buf[8];
+        if (i < 6) label = UI_MODES[i];
+        else if (i == 6) label = "R-";
+        else if (i == 7) label = "R+";
+        else if (i == 8) label = "OK";
+        else label = "X";
+        TextOutA(g_ui_dc, r.left + 4, r.top + 8, label, (int)strlen(label));
+        (void)buf;
+    }
+    /* GDI writes into a 32bpp DIB with alpha 0; UpdateLayeredWindow would make
+     * the whole bar invisible, so force it opaque. */
+    for (int y = 0; y < UI_BAR_H && y < g_ui_h; ++y)
+        for (int x = 0; x < g_ui_w; ++x)
+            g_ui_bits[((size_t)y * g_ui_w + x) * 4 + 3] = 0xFF;
+}
+
+static void ui_bar_click(int ox, int oy) {
+    (void)oy;
+    for (int i = 0; i < 10; ++i) {
+        RECT r; ui_bar_rect(i, &r);
+        if (ox < r.left || ox > r.right) continue;
+        if (i < 6) g_ui.mode = i;
+        else if (i == 6) { g_ui.radius = g_ui.radius > 16 ? g_ui.radius - 16 : 8; }
+        else if (i == 7) { g_ui.radius += 16; }
+        else if (i == 8) { ui_commit(); ui_close(); return; }
+        else { ui_close(); return; }
+        if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
+        ui_draw_bar();
+        ui_update_window();
+        ms_log("UI: button %d -> mode=%d radius=%d", i, g_ui.mode, g_ui.radius);
+        return;
+    }
+}
 
 static void ui_render_rect(int dx0, int dy0, int dx1, int dy1) {
     if (!g_ui_bits || !g_ui.doc) return;
@@ -3071,7 +3136,7 @@ static void ui_render_rect(int dx0, int dy0, int dx1, int dy1) {
             if (ox < 0 || ox >= g_ui_w) continue;
             int sx = ox * g_ui.dw / g_ui_w;
             const unsigned char *src = g_ui.doc + ((size_t)sy * g_ui.dw + sx) * 4;
-            unsigned char *dst = g_ui_bits + ((size_t)oy * g_ui_w + ox) * 4;
+            unsigned char *dst = g_ui_bits + ((size_t)(oy + UI_BAR_H) * g_ui_w + ox) * 4;
             dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
         }
     }
@@ -3081,7 +3146,7 @@ static void ui_update_window(void) {
     if (!g_ui_hwnd) return;
     HDC screen = GetDC(NULL);
     POINT pt = { g_ui_x, g_ui_y };
-    SIZE sz = { g_ui_w, g_ui_h };
+    SIZE sz = { g_ui_w, g_ui_h + UI_BAR_H };
     POINT src = { 0, 0 };
     BLENDFUNCTION bf;
     bf.BlendOp = AC_SRC_OVER;
@@ -3116,10 +3181,17 @@ static void ui_close(void) {
 }
 
 static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_LBUTTONDOWN || m == WM_LBUTTONUP || m == WM_RBUTTONUP)
+        ms_log("UI: msg 0x%x at %d,%d", (unsigned)m, (int)LOWORD(l), (int)HIWORD(l));
     switch (m) {
     case WM_LBUTTONDOWN: {
+        int cy = (int)HIWORD(l);
+        if (cy < UI_BAR_H) {
+            ui_bar_click((int)LOWORD(l), cy);
+            return 0;
+        }
         float dx = (float)LOWORD(l) * g_ui.dw / g_ui_w;
-        float dy = (float)HIWORD(l) * g_ui.dh / g_ui_h;
+        float dy = (float)(cy - UI_BAR_H) * g_ui.dh / g_ui_h;
         ms_log("UI: down at doc %.0f,%.0f", dx, dy);
         SetCapture(h);
         g_ui.down = 1;
@@ -3218,13 +3290,13 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     g_ui_h = h * zoom / 100;
     if (g_ui_w < 32 || g_ui_h < 32) { ui_close(); ms_log("UI: bad paper %dx%d", g_ui_w, g_ui_h); return 0; }
     g_ui_x = o.x + (rc.right - g_ui_w) / 2;
-    g_ui_y = o.y + (rc.bottom - g_ui_h) / 2;
+    g_ui_y = o.y + (rc.bottom - g_ui_h) / 2 - UI_BAR_H;
 
     /* 4. surface + window */
     BITMAPINFO bi; memset(&bi, 0, sizeof bi);
     bi.bmiHeader.biSize = sizeof bi.bmiHeader;
     bi.bmiHeader.biWidth = g_ui_w;
-    bi.bmiHeader.biHeight = -g_ui_h;             /* top-down */
+    bi.bmiHeader.biHeight = -(g_ui_h + UI_BAR_H);  /* top-down, bar included */
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
@@ -3235,6 +3307,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     if (!g_ui_bmp || !g_ui_bits) { ui_close(); ms_log("UI: create surface failed"); return 0; }
     SelectObject(g_ui_dc, g_ui_bmp);
     ui_render_rect(0, 0, w - 1, h - 1);
+    ui_draw_bar();
 
     WNDCLASSEXA wc; memset(&wc, 0, sizeof wc);
     wc.cbSize = sizeof wc;
@@ -3244,7 +3317,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     RegisterClassExA(&wc);
     g_ui_hwnd = CreateWindowExA(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                                 "LiquifyOverlay", "liquify", WS_POPUP,
-                                g_ui_x, g_ui_y, g_ui_w, g_ui_h,
+                                g_ui_x, g_ui_y, g_ui_w, g_ui_h + UI_BAR_H,
                                 NULL, NULL, wc.hInstance, NULL);
     if (!g_ui_hwnd) { ui_close(); ms_log("UI: create window failed"); return 0; }
     ui_update_window();
@@ -3266,13 +3339,19 @@ static DWORD WINAPI ui_thread(LPVOID p) {
         if (!g_ui_hwnd) break;
 
         POINT p; GetCursorPos(&p);
-        int over = p.x >= g_ui_x && p.x < g_ui_x + g_ui_w &&
-                   p.y >= g_ui_y && p.y < g_ui_y + g_ui_h;
+        int in_x = p.x >= g_ui_x && p.x < g_ui_x + g_ui_w;
+        int in_bar = in_x && p.y >= g_ui_y && p.y < g_ui_y + UI_BAR_H;
+        int in_doc = in_x && p.y >= g_ui_y + UI_BAR_H &&
+                     p.y < g_ui_y + UI_BAR_H + g_ui_h;
+        int over = in_bar || in_doc;
         int down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         float dx = (float)(p.x - g_ui_x) * g_ui.dw / g_ui_w;
-        float dy = (float)(p.y - g_ui_y) * g_ui.dh / g_ui_h;
+        float dy = (float)(p.y - g_ui_y - UI_BAR_H) * g_ui.dh / g_ui_h;
 
-        if (down && over) {
+        if (down && in_bar) {
+            /* clicks on the bar are handled by WM_LBUTTONDOWN; just make sure
+             * the brush never starts there */
+        } else if (down && in_doc) {
             if (!g_ui.down) {
                 if (!g_ui.ctx)
                     g_ui.ctx = lq_create(g_ui.doc, g_ui.dw, g_ui.dh, g_ui.dw * 4);

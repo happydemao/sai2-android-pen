@@ -580,3 +580,29 @@ UI: committed 1600x1600 as a new layer
 "mouse stroke" 也没有 UI 的 down/move）。这是**测试注入路径**的问题，
 不是产品路径（真实用笔时由 PenBridge 的 Java 侧合成按键事件）。
 下轮改用「由叠加层自己按脚本路径驱动」来测，避免再依赖注入线程。
+
+## 叠加层工具栏（2026-11-22 02:00）
+
+叠加窗顶部加了一条 34px 的工具栏（画进同一个 layered surface，GDI 绘制后强制
+alpha=255，否则 `UpdateLayeredWindow` 下整条不可见）：
+
+```
+[FWD][BLT][PNC][CW][CCW][SMO][R-][R+][OK][X]
+```
+
+- 当前模式高亮（蓝色）；
+- 点击由 `WM_LBUTTONDOWN` 处理——实测 **adb tap 会送窗口消息**（`0x201 at 226,289`），
+  比轮询可靠；笔刷拖动仍靠轮询光标+按键（adb 拖拽不产生按键状态）；
+- 换模式/改半径会销毁当前位移场（下一笔从新场开始）。
+
+实测：
+
+```
+UI: button 3 -> mode=3 radius=120      # 点 CW
+UI: move doc 242,339 ...               # 在绿方块上拖
+UI: button 8 -> committed ...          # 点 OK -> 图层3（旋涡缺口可见）
+UI: button 7 -> mode=0 radius=136      # 点 R+
+UI: button 9 ...                       # 点 X 关闭
+```
+
+新增 `liquify/probe/phone_doc.sh`：一键在手机上铺好 1600×1600 文档 + 测试图。
