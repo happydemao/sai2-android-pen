@@ -114,3 +114,26 @@ GitHub Release `v0.3.28` 的 APK 已经是新包名 **`lator.forsai`**，
 - 新包数据目录是 `/data/data/lator.forsai/`，旧 `com.winlator` 的数据不迁移；
 - 两个包可共存，但不要同时启动 SAI，否则会出现两套容器/两条输入路径；
 - 安装新包后如果容器是第一次启动，需要重新解压 rootfs，耗时约 1 分钟。
+
+## 0.3.29：默认值调整
+
+在 `lator.forsai` 的 `classes.dex` 上：
+
+1. **关闭“捕获外接鼠标指针”默认值**
+   - `SettingsFragment.smali`：`capture_pointer_on_external_mouse` 的
+     `getBoolean` 默认值 `0x1` -> `0x0`
+   - `XServerDisplayActivity.smali`：读取同一 preference 前
+     `const/4 v4, 0x0`
+
+2. **容器默认分辨率 = 屏幕分辨率**
+   - `Container.<init>(I)` 的默认 `"1280x720"` 改为
+     `AppUtils.getScreenWidth()/getScreenHeight()` 的长边 x 短边。
+
+3. **DPI 按实际屏幕**
+   - `ScreenInfo.getWidthInMillimeters()` / `getHeightInMillimeters()`
+     不再用 `width/10`（固定 254 DPI），改为
+     `pixels * 25.4 / DisplayMetrics.xdpi`（或 `ydpi`）。
+   - SM-X810 上报 `xdpi≈274.6`、`ydpi≈275.5`，所以 Wine 屏幕约 275 DPI，
+     而不是原来的 254。
+
+4. 当前容器 `screenSize` 从 `2560x1660` 修正为 `2560x1600`。
