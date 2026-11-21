@@ -450,3 +450,27 @@ java -cp /tmp/ltest com.winlator.sai.LiquifyCompare /private/tmp/lqjava
 ```
 
 结论：Android 端不是「差不多的重写」，而是**与 DLL/参考引擎逐字节一致的移植**。
+
+## 进程内一键液化（2026-11-22 01:35）
+
+不再用 adb 发按键：`C:\wt_auto` 触发后，DLL 自己完成整条链：
+
+```
+AUTO: foreground=sflRootWindow|PaintTool SAI Ver.2 ...
+CLIPREAD: 1600x1600 ...
+LQNET: forward 1600x1600 round trip 2938ms (java warp 2917ms)   # 冷
+PASTE: 1600x1600 CF_DIB placed
+AUTO: done (pasted as a new layer)
+```
+
+第二次触发：`round trip 46ms (java warp 33ms)`。
+
+实现：`SendInput` 发 Ctrl+A / Ctrl+C → 轮询剪贴板拿到 CF_DIB →
+`lq_net_ex("C:\\wt_lq.txt")`（app 端 Java 引擎）→ 失败则回退到本地 lq.c →
+`doc_paste()` → `SendInput` Ctrl+V。
+
+**冷启动 2.9s 的原因**：`LiquifyWarp.warp` 首次调用还在解释执行（ART 的 JIT
+要够多次调用才编译），预热只跑了 3 次 64×64，没到阈值。第二次起 33–45ms。
+下一步把预热改成足够多次的小图调用。
+
+验证：截图里 图层3 是粘贴进来的结果，红线中段被推出 S 形弯，和参数一致。

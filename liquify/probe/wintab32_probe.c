@@ -2871,30 +2871,29 @@ static void lq_run(void) {
  * Response: status, len, pixels
  * Trigger : C:\wt_lqnet with "<mode> <x0> <y0> <x1> <y1> <radius> <strength> <steps>"
  */
-static void lq_net(void) {
+static int lq_net_ex(const char *specpath) {
     int w = 0, h = 0, bpp = 0;
     FILE *cf = fopen("C:\\wt_clipin.txt", "r");
     if (cf) { if (fscanf(cf, "%d %d %d", &w, &h, &bpp) != 3) w = h = 0; fclose(cf); }
-    if (w <= 0 || h <= 0) { ms_log("LQNET: no wt_clipin.txt"); return; }
+    if (w <= 0 || h <= 0) { ms_log("LQNET: no wt_clipin.txt"); return 0; }
     size_t imgsz = (size_t)w * 4 * (size_t)h;
     unsigned char *img = (unsigned char*)malloc(imgsz);
     FILE *pf = fopen("C:\\wt_clipin.bin", "rb");
-    if (!pf || !img) { if (pf) fclose(pf); free(img); ms_log("LQNET: no input"); return; }
+    if (!pf || !img) { if (pf) fclose(pf); free(img); ms_log("LQNET: no input"); return 0; }
     size_t got = fread(img, 1, imgsz, pf);
     fclose(pf);
-    if (got != imgsz) { free(img); ms_log("LQNET: short read"); return; }
+    if (got != imgsz) { free(img); ms_log("LQNET: short read"); return 0; }
 
     char mode[32] = "forward"; int m = 0;
     float x0 = w * 0.4f, y0 = h * 0.5f, x1 = w * 0.6f, y1 = h * 0.5f;
     float radius = w * 0.1f, strength = 0.6f;
     int steps = 40;
-    cf = fopen("C:\\wt_lqnet", "r");
+    cf = fopen(specpath, "r");
     if (cf) {
         if (fscanf(cf, "%31s %f %f %f %f %f %f %d", mode, &x0, &y0, &x1, &y1,
                    &radius, &strength, &steps) < 1) strcpy(mode, "forward");
         fclose(cf);
     }
-    DeleteFileA("C:\\wt_lqnet");
     if (!strcmp(mode, "bloat")) m = 1;
     else if (!strcmp(mode, "pinch")) m = 2;
     else if (!strcmp(mode, "twirl_cw")) m = 3;
@@ -2903,9 +2902,9 @@ static void lq_net(void) {
     else m = 0;
 
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { free(img); ms_log("LQNET: WSAStartup failed"); return; }
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { free(img); ms_log("LQNET: WSAStartup failed"); return 0; }
     SOCKET sk = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sk == INVALID_SOCKET) { free(img); WSACleanup(); ms_log("LQNET: socket failed"); return; }
+    if (sk == INVALID_SOCKET) { free(img); WSACleanup(); ms_log("LQNET: socket failed"); return 0; }
     struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
     sa.sin_port = htons(47801);
@@ -2913,7 +2912,7 @@ static void lq_net(void) {
     if (connect(sk, (struct sockaddr*)&sa, sizeof sa) != 0) {
         closesocket(sk); WSACleanup(); free(img);
         ms_log("LQNET: connect 127.0.0.1:47801 failed (server not running?)");
-        return;
+        return 0;
     }
     DWORD t0 = GetTickCount();
     int ok = 1;
@@ -2956,7 +2955,7 @@ static void lq_net(void) {
     closesocket(sk);
     WSACleanup();
     DWORD t1 = GetTickCount();
-    if (!ok) { free(img); ms_log("LQNET: request failed (status=%u len=%u)", status, rlen); return; }
+    if (!ok) { free(img); ms_log("LQNET: request failed (status=%u len=%u)", status, rlen); return 0; }
 
     FILE *of = fopen("C:\\wt_paste.bin", "wb");
     if (of) { fwrite(img, 1, imgsz, of); fclose(of); }
@@ -2966,6 +2965,70 @@ static void lq_net(void) {
            mode, w, h, (unsigned long)(t1 - t0), ms);
     free(img);
     doc_paste();
+    return 1;
+}
+
+/* ---- in-process liquify flow (C:\wt_auto) ------------------------------
+ * Up to now the copy/warp/paste steps were driven from the host with adb
+ * keystrokes. A real plugin has to do it itself: SendInput Ctrl+A / Ctrl+C,
+ * read the CF_DIB, run the warp, publish the result and SendInput Ctrl+V.
+ *
+ * The spec comes from C:\wt_lq.txt (same format as wt_lq), so the same trigger
+ * can request any of the five modes.
+ */
+static void send_vk(WORD vk, int up) {
+    INPUT in;
+    memset(&in, 0, sizeof in);
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    in.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+    SendInput(1, &in, sizeof in);
+}
+
+static void send_ctrl_key(WORD vk) {
+    send_vk(VK_CONTROL, 0);
+    send_vk(vk, 0);
+    Sleep(30);
+    send_vk(vk, 1);
+    send_vk(VK_CONTROL, 1);
+}
+
+static int clipboard_has_dib(void) {
+    if (!OpenClipboard(NULL)) return 0;
+    int has = GetClipboardData(CF_DIB) != NULL;
+    CloseClipboard();
+    return has;
+}
+
+static void auto_flow(void) {
+    HWND fg = GetForegroundWindow();
+    if (!fg) { ms_log("AUTO: no foreground window"); return; }
+    ms_log("AUTO: foreground=%p class=%s", (void*)fg, gdi_class_of(GetDC(fg)));
+
+    /* drop any stale clipboard content so "has DIB" means SAI copied */
+    if (OpenClipboard(NULL)) { EmptyClipboard(); CloseClipboard(); }
+
+    send_ctrl_key('A');
+    Sleep(120);
+    send_ctrl_key('C');
+    int got = 0;
+    for (int i = 0; i < 40; ++i) {
+        Sleep(100);
+        if (clipboard_has_dib()) { got = 1; break; }
+    }
+    if (!got) { ms_log("AUTO: SAI did not put a CF_DIB on the clipboard"); return; }
+    clipboard_read();
+    send_ctrl_key('D');           /* drop the marching-ants selection */
+
+    /* the server path is the product one; fall back to the local engine when
+     * the app was not patched (e.g. a stock build) */
+    if (!lq_net_ex("C:\\wt_lq.txt")) {
+        ms_log("AUTO: server unavailable, warping locally");
+        lq_run();
+    }
+    Sleep(150);
+    send_ctrl_key('V');
+    ms_log("AUTO: done (pasted as a new layer)");
 }
 
 static DWORD WINAPI memscan_thread(LPVOID p) {
@@ -3065,8 +3128,14 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
             }
             continue;
         }
+        if (GetFileAttributesA("C:\\wt_auto") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_auto");
+            auto_flow();
+            continue;
+        }
         if (GetFileAttributesA("C:\\wt_lqnet") != INVALID_FILE_ATTRIBUTES) {
-            lq_net();
+            DeleteFileA("C:\\wt_lqnet");
+            lq_net_ex("C:\\wt_lqnet");
             continue;
         }
         if (GetFileAttributesA("C:\\wt_lq") != INVALID_FILE_ATTRIBUTES) {
