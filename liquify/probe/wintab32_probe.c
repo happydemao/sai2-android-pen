@@ -3188,6 +3188,7 @@ static void ui_commit(void) {
 }
 
 static void ui_close(void) {
+    g_ui_starting = 0;
     if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
     if (g_ui.doc) { free(g_ui.doc); g_ui.doc = NULL; }
     if (g_ui_bmp) { DeleteObject(g_ui_bmp); g_ui_bmp = NULL; }
@@ -3255,6 +3256,13 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 static DWORD WINAPI ui_thread(LPVOID p) {
     (void)p;
+    /* The Android-side button takes the focus, so hand it back to SAI before
+     * sending Ctrl+A/C - otherwise the copy never happens. */
+    if (g_hwnd) {
+        SetForegroundWindow(g_hwnd);
+        SetFocus(g_hwnd);
+        Sleep(250);
+    }
     /* 1. capture the document through SAI's own clipboard copy */
     if (OpenClipboard(NULL)) { EmptyClipboard(); CloseClipboard(); }
     send_ctrl_key('A');
@@ -3305,19 +3313,43 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     g_ui_sc = zoom / 100.0f;
     int pw = (int)(w * g_ui_sc), ph = (int)(h * g_ui_sc);
     int pl = o.x + (rc.right - pw) / 2, pt = o.y + (rc.bottom - ph) / 2;
-    if (g_cv_dst) {
-        if (g_cv_cx >= 8 && g_cv_cy >= 8) {
-            /* dest(x,y) shows document (sx,sy): recover the paper origin */
-            pl = o.x + g_cv_x - (int)(g_cv_sx * g_ui_sc);
-            pt = o.y + g_cv_y - (int)(g_cv_sy * g_ui_sc);
+    if (zoom == 100 && g_cv_cx >= 8 && g_cv_cy >= 8) {
+        /* 1:1 blit: dest(x,y) shows document (sx,sy), so the paper origin is
+         * exact. At other zooms the source coords are already viewport pixels
+         * and scaling them again lands in the wrong place, so keep the centred
+         * estimate there. */
+        int ql = o.x + g_cv_x - g_cv_sx;
+        int qt = o.y + g_cv_y - g_cv_sy;
+        if (ql > o.x - pw && ql < o.x + rc.right && qt > o.y - ph && qt < o.y + rc.bottom) {
+            pl = ql;
+            pt = qt;
         }
     }
     int vl = pl, vt = pt, vr = pl + pw, vb = pt + ph;
+    ms_log("UI: geom doc=%dx%d zoom=%d paper=%d,%d %dx%d blit=(%d,%d from %d,%d)",
+           w, h, zoom, pl, pt, pw, ph, g_cv_x, g_cv_y, g_cv_sx, g_cv_sy);
     if (vl < o.x) vl = o.x;
     if (vt < o.y) vt = o.y;
     if (vr > o.x + rc.right) vr = o.x + rc.right;
     if (vb > o.y + rc.bottom) vb = o.y + rc.bottom;
-    if (vr - vl < 32 || vb - vt < 32) { ui_close(); g_ui_starting = 0; ms_log("UI: bad paper %dx%d", w, h); return 0; }
+    if (vr - vl < 32 || vb - vt < 32) {
+        /* implausible geometry: fall back to the centred estimate */
+        pw = (int)(w * g_ui_sc);
+        ph = (int)(h * g_ui_sc);
+        pl = o.x + (rc.right - pw) / 2;
+        pt = o.y + (rc.bottom - ph) / 2;
+        vl = pl; vt = pt; vr = pl + pw; vb = pt + ph;
+        if (vl < o.x) vl = o.x;
+        if (vt < o.y) vt = o.y;
+        if (vr > o.x + rc.right) vr = o.x + rc.right;
+        if (vb > o.y + rc.bottom) vb = o.y + rc.bottom;
+        ms_log("UI: geom fallback %d,%d %dx%d", vl, vt, vr - vl, vb - vt);
+        if (vr - vl < 32 || vb - vt < 32) {
+            ui_close();
+            ms_log("UI: bad paper %dx%d", w, h);
+            return 0;
+        }
+    }
     g_ui_w = vr - vl;
     g_ui_h = vb - vt;
     g_ui_x = vl;
@@ -3450,6 +3482,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
  * canvas. Registration result is logged so a conflict is visible.
  */
 static DWORD WINAPI ui_thread(LPVOID p);
+static DWORD WINAPI ui_watcher_thread(LPVOID p);
 static HWND g_hotkey_wnd;
 static int g_hotkey_started;
 
@@ -3489,171 +3522,20 @@ static DWORD WINAPI hotkey_thread(LPVOID p) {
     return 0;
 }
 
-/* ---- floating launcher button (touch entry point) ----------------------
- * Winlator's virtual keyboard cannot deliver a Wine RegisterHotKey combo, so
- * the plugin also puts a small draggable button on screen: tap = open the
- * liquify overlay, drag = move it somewhere harmless. It stays on top and
- * never takes focus away from SAI.
- */
-static HWND g_launch_wnd;
-static HDC g_launch_dc;
-static HBITMAP g_launch_bmp;
-static unsigned char *g_launch_bits;
-static int g_launch_w, g_launch_h;
-static int g_launch_drag, g_launch_moved, g_launch_pinned;
-
-static void launcher_paint(void) {
-    if (!g_launch_bits) return;
-    /* round-ish padded button, drawn straight into the BGRA surface */
-    int w = g_launch_w, h = g_launch_h;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            unsigned char *px = g_launch_bits + ((size_t)y * w + x) * 4;
-            int dx = x - w / 2, dy = y - h / 2;
-            int r2 = dx * dx + dy * dy;
-            int rr = (w / 2 - 2) * (w / 2 - 2);
-            if (r2 > rr) { px[0] = px[1] = px[2] = px[3] = 0; continue; }
-            int border = (r2 > rr - 3 * (w / 2));
-            px[0] = border ? 255 : 30;
-            px[1] = border ? 255 : 130;
-            px[2] = border ? 255 : 220;
-            px[3] = 255;
-        }
-    }
-    if (g_launch_dc) {
-        SetBkMode(g_launch_dc, TRANSPARENT);
-        SetTextColor(g_launch_dc, RGB(255, 255, 255));
-        RECT rc = { 0, 0, w, h };
-        DrawTextA(g_launch_dc, "LQ", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x)
-                if (g_launch_bits[((size_t)y * w + x) * 4 + 3])
-                    g_launch_bits[((size_t)y * w + x) * 4 + 3] = 255;
-    }
-}
-
-static void launcher_update(void) {
-    if (!g_launch_wnd || !g_launch_dc) return;
-    HDC screen = GetDC(NULL);
-    POINT pt = { 0, 0 }, src = { 0, 0 };
-    SIZE sz = { g_launch_w, g_launch_h };
-    RECT r;
-    GetWindowRect(g_launch_wnd, &r);
-    pt.x = r.left; pt.y = r.top;
-    BLENDFUNCTION bf;
-    bf.BlendOp = AC_SRC_OVER; bf.BlendFlags = 0;
-    bf.SourceConstantAlpha = 255; bf.AlphaFormat = AC_SRC_ALPHA;
-    UpdateLayeredWindow(g_launch_wnd, screen, &pt, &sz, g_launch_dc, &src, 0, &bf, ULW_ALPHA);
-    ReleaseDC(NULL, screen);
-}
-static int g_launch_dx, g_launch_dy, g_launch_sx, g_launch_sy;
-
-static LRESULT CALLBACK launcher_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    switch (m) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        BeginPaint(h, &ps);
-        EndPaint(h, &ps);
-        return 0;
-    }
-    case WM_LBUTTONDOWN: {
-        POINT p;
-        RECT r;
-        GetCursorPos(&p);
-        GetWindowRect(h, &r);
-        g_launch_dx = p.x - r.left;
-        g_launch_dy = p.y - r.top;
-        g_launch_sx = p.x;
-        g_launch_sy = p.y;
-        g_launch_drag = 1;
-        g_launch_moved = 0;
-        SetCapture(h);
-        return 0;
-    }
-    case WM_MOUSEMOVE: {
-        if (!g_launch_drag) return 0;
-        POINT p;
-        GetCursorPos(&p);
-        if (abs(p.x - g_launch_sx) > 4 || abs(p.y - g_launch_sy) > 4) {
-            g_launch_moved = 1;
-            SetWindowPos(h, HWND_TOPMOST, p.x - g_launch_dx, p.y - g_launch_dy,
-                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-            launcher_update();
-        }
-        return 0;
-    }
-    case WM_LBUTTONUP: {
-        g_launch_drag = 0;
-        ReleaseCapture();
-        if (g_launch_moved) {
-            g_launch_pinned = 1;
-            ms_log("LAUNCH: button moved");
-        } else if (!g_ui_hwnd && !g_ui_starting) {
+/* The Android-side button drops C:\wt_ui into the container; this watcher
+ * turns it into an overlay. It runs from the first WTOpen, independent of the
+ * GDI capture hooks, so the plugin can be opened without any debug switches. */
+static DWORD WINAPI ui_watcher_thread(LPVOID p) {
+    (void)p;
+    for (;;) {
+        Sleep(250);
+        if (!g_ui_hwnd && !g_ui_starting &&
+            GetFileAttributesA("C:\\wt_ui") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_ui");
             g_ui_starting = 1;
             CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
-            ms_log("LAUNCH: opening liquify overlay");
+            ms_log("UI: opened from the app button");
         }
-        return 0;
-    }
-    case WM_TIMER:
-        if (!IsWindowVisible(h)) ShowWindow(h, SW_SHOWNA);
-        if (!g_launch_pinned && g_hwnd) {
-            RECT r;
-            GetWindowRect(g_hwnd, &r);
-            SetWindowPos(h, HWND_TOPMOST, r.left + 6, r.top + 6,
-                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-        } else {
-            /* other windows (a maximised SAI) can still rise above a popup:
-             * re-assert the z-order periodically */
-            SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-        launcher_update();
-        return 0;
-    }
-    return DefWindowProcA(h, m, w, l);
-}
-
-static DWORD WINAPI launcher_thread(LPVOID p) {
-    (void)p;
-    WNDCLASSA wc;
-    memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = launcher_wndproc;
-    wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "LiquifyLauncher";
-    RegisterClassA(&wc);
-    g_launch_w = 56; g_launch_h = 56;
-    BITMAPINFO bi;
-    memset(&bi, 0, sizeof bi);
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = g_launch_w;
-    bi.bmiHeader.biHeight = -g_launch_h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    HDC screen = GetDC(NULL);
-    g_launch_dc = CreateCompatibleDC(screen);
-    ReleaseDC(NULL, screen);
-    g_launch_bmp = CreateDIBSection(g_launch_dc, &bi, DIB_RGB_COLORS,
-                                    (void**)&g_launch_bits, NULL, 0);
-    if (!g_launch_bmp) { ms_log("LAUNCH: surface failed"); return 0; }
-    SelectObject(g_launch_dc, g_launch_bmp);
-    launcher_paint();
-    /* WS_EX_NOACTIVATE made the popup click-through under this Wine build, so
-     * the button never saw a tap; it takes focus on click instead. */
-    g_launch_wnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
-                                   "LiquifyLauncher", "LQ", WS_POPUP,
-                                   100, 100, g_launch_w, g_launch_h,
-                                   NULL, NULL, wc.hInstance, NULL);
-    if (!g_launch_wnd) { ms_log("LAUNCH: create failed"); return 0; }
-    ShowWindow(g_launch_wnd, SW_SHOWNOACTIVATE);
-    launcher_update();
-    SetTimer(g_launch_wnd, 1, 800, NULL);
-    ms_log("LAUNCH: floating button ready");
-    MSG msg;
-    while (GetMessageA(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
     }
     return 0;
 }
@@ -3939,7 +3821,7 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
     if (!g_hotkey_started) {
         g_hotkey_started = 1;
         CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
-        CreateThread(NULL, 0, launcher_thread, NULL, 0, NULL);
+        CreateThread(NULL, 0, ui_watcher_thread, NULL, 0, NULL);
     }
     if (lc) {
         log_ctx("WTOpenW ctx from app", lc);

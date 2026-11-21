@@ -768,3 +768,33 @@ Wine 的 RegisterHotKey。于是加了一个**屏幕悬浮按钮**：
    - 叠加层裁到画布可见区域，内部用 `g_ui_offx/offy + g_ui_sc` 映射文档坐标。
 
 顶部工具栏、状态栏、笔刷圆环都随之改用新的缩放/偏移。
+
+## 触屏入口改到 app 内（2026-11-22 02:55）
+
+Wine 弹窗按钮在这个 Wine 版本里 z-order 和命中测试都不可靠（会被 SAI 窗口盖住、
+点了没反应）。改成 **app 内按钮**：
+
+- `LiquifyButton.java`：往 `TouchpadView` 的根 View 里 add 一个 60dp 圆角 `液化`
+  按钮（蓝底白字），从 `TouchpadView.updateXform` 注入
+  `invoke-static {p0}, Lcom/winlator/sai/LiquifyButton;->install(Landroid/view/View;)V`；
+- 点击 → 写 `C:\wt_ui` → DLL 里的 `ui_watcher_thread`（从第一次 WTOpen 起常驻，
+  250ms 轮询）打开叠加层；
+- DLL 侧删掉了 Wine 弹窗按钮（省 1.6KB，也免了 z-order 的坑）。
+
+实测日志：
+
+```
+UI: opened from the app button
+CLIPREAD: 1600x1600 bpp=24
+UI: geom doc=1600x1600 zoom=33 paper=974,145 528x528
+UI: 1600x1600 doc, paper 528x528 at 974,111, mode=forward radius=120 strength=0.80
+```
+
+截图确认：蓝圈 `液化` 按钮 → 叠加层工具栏（12 钮）+ 底部 `R=120 FWD P=0%`
+状态栏 + 光标处的**虚线圈**（液化范围）。
+
+### 几何修复
+
+blit 反推只在 **100% 缩放**时可信（那时 1:1），其它缩放用「居中 + 标题百分比」，
+否则会把画纸算到 (549,-111) 这种离谱位置。现在 33% 时 paper=(974,145) 528x528，
+与屏幕完全吻合。
