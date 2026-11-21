@@ -2863,6 +2863,111 @@ static void lq_run(void) {
     doc_paste();
 }
 
+/* ---- Android-side processing over localhost ---------------------------
+ * The DLL only shuttles pixels; the five modes run in the app's Java engine
+ * (LiquifyServer / LiquifyWarp), which is native ARM code instead of Box64.
+ *
+ * Request : 'LQ01', w,h,mode,steps, x0,y0,x1,y1,radius,strength, len, pixels
+ * Response: status, len, pixels
+ * Trigger : C:\wt_lqnet with "<mode> <x0> <y0> <x1> <y1> <radius> <strength> <steps>"
+ */
+static void lq_net(void) {
+    int w = 0, h = 0, bpp = 0;
+    FILE *cf = fopen("C:\\wt_clipin.txt", "r");
+    if (cf) { if (fscanf(cf, "%d %d %d", &w, &h, &bpp) != 3) w = h = 0; fclose(cf); }
+    if (w <= 0 || h <= 0) { ms_log("LQNET: no wt_clipin.txt"); return; }
+    size_t imgsz = (size_t)w * 4 * (size_t)h;
+    unsigned char *img = (unsigned char*)malloc(imgsz);
+    FILE *pf = fopen("C:\\wt_clipin.bin", "rb");
+    if (!pf || !img) { if (pf) fclose(pf); free(img); ms_log("LQNET: no input"); return; }
+    size_t got = fread(img, 1, imgsz, pf);
+    fclose(pf);
+    if (got != imgsz) { free(img); ms_log("LQNET: short read"); return; }
+
+    char mode[32] = "forward"; int m = 0;
+    float x0 = w * 0.4f, y0 = h * 0.5f, x1 = w * 0.6f, y1 = h * 0.5f;
+    float radius = w * 0.1f, strength = 0.6f;
+    int steps = 40;
+    cf = fopen("C:\\wt_lqnet", "r");
+    if (cf) {
+        if (fscanf(cf, "%31s %f %f %f %f %f %f %d", mode, &x0, &y0, &x1, &y1,
+                   &radius, &strength, &steps) < 1) strcpy(mode, "forward");
+        fclose(cf);
+    }
+    DeleteFileA("C:\\wt_lqnet");
+    if (!strcmp(mode, "bloat")) m = 1;
+    else if (!strcmp(mode, "pinch")) m = 2;
+    else if (!strcmp(mode, "twirl_cw")) m = 3;
+    else if (!strcmp(mode, "twirl_ccw")) m = 4;
+    else if (!strcmp(mode, "smooth")) m = 5;
+    else m = 0;
+
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { free(img); ms_log("LQNET: WSAStartup failed"); return; }
+    SOCKET sk = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sk == INVALID_SOCKET) { free(img); WSACleanup(); ms_log("LQNET: socket failed"); return; }
+    struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(47801);
+    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(sk, (struct sockaddr*)&sa, sizeof sa) != 0) {
+        closesocket(sk); WSACleanup(); free(img);
+        ms_log("LQNET: connect 127.0.0.1:47801 failed (server not running?)");
+        return;
+    }
+    DWORD t0 = GetTickCount();
+    int ok = 1;
+    /* Java's DataInputStream is big-endian; the first version sent host
+     * (little-endian) words, the server rejected the request and closed. */
+    unsigned int u;
+    u = htonl(0x4C513031u); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    u = htonl((unsigned)w); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    u = htonl((unsigned)h); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    u = htonl((unsigned)m); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    u = htonl((unsigned)steps); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    float f;
+    f = x0; u = htonl(*(unsigned*)&f); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    f = y0; u = htonl(*(unsigned*)&f); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    f = x1; u = htonl(*(unsigned*)&f); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    f = y1; u = htonl(*(unsigned*)&f); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    f = radius; u = htonl(*(unsigned*)&f); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    f = strength; u = htonl(*(unsigned*)&f); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    u = htonl((unsigned)imgsz); ok &= send(sk, (const char*)&u, 4, 0) == 4;
+    size_t sent = 0;
+    while (ok && sent < imgsz) {
+        int n = send(sk, (const char*)img + sent, (int)(imgsz - sent), 0);
+        if (n <= 0) { ok = 0; break; }
+        sent += (size_t)n;
+    }
+    unsigned int status = 0xFFFFFFFF, rlen = 0;
+    int rn = recv(sk, (char*)&status, 4, 0);
+    if (rn != 4) ok = 0; else status = ntohl(status);
+    if (ok) { rn = recv(sk, (char*)&rlen, 4, 0); if (rn != 4) ok = 0; else rlen = ntohl(rlen); }
+    if (ok && status == 0 && rlen == imgsz) {
+        size_t got2 = 0;
+        while (got2 < imgsz) {
+            int n = recv(sk, (char*)img + got2, (int)(imgsz - got2), 0);
+            if (n <= 0) { ok = 0; break; }
+            got2 += (size_t)n;
+        }
+    } else ok = 0;
+    unsigned int ms = 0;
+    if (ok) { int rn2 = recv(sk, (char*)&ms, 4, 0); if (rn2 == 4) ms = ntohl(ms); }
+    closesocket(sk);
+    WSACleanup();
+    DWORD t1 = GetTickCount();
+    if (!ok) { free(img); ms_log("LQNET: request failed (status=%u len=%u)", status, rlen); return; }
+
+    FILE *of = fopen("C:\\wt_paste.bin", "wb");
+    if (of) { fwrite(img, 1, imgsz, of); fclose(of); }
+    FILE *tf = fopen("C:\\wt_paste.txt", "wb");
+    if (tf) { fprintf(tf, "%d %d", w, h); fclose(tf); }
+    ms_log("LQNET: mode=%s %dx%d round trip %lums (java warp %ums)",
+           mode, w, h, (unsigned long)(t1 - t0), ms);
+    free(img);
+    doc_paste();
+}
+
 static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
@@ -2958,6 +3063,10 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
                 }
                 free(bf);
             }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_lqnet") != INVALID_FILE_ATTRIBUTES) {
+            lq_net();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_lq") != INVALID_FILE_ATTRIBUTES) {

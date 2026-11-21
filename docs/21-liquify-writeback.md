@@ -355,3 +355,63 @@ ALL PASS (0 failures)
 
 bloat/pinch 的位移量随步数饱和（内容被推出笔刷半径后质心指标失效），
 所以单测只用 3 步验证方向，不验证幅度。
+
+# Android 端处理接通（2026-11-22 00:50）
+
+## 架构变了：像素处理搬进 app
+
+```
+SAI Ctrl+A/C  ->  CF_DIB 1600x1600
+wt_clipread   ->  wt_clipin.bin（32bpp BGRA）
+wt_lqnet      ->  127.0.0.1:47801  ->  LiquifyServer（app，Java）-> LiquifyWarp
+               <-  变形后的 BGRA
+wt_paste      ->  CF_DIB  ->  Ctrl+V  ->  SAI 新图层
+```
+
+DLL 不再自己算像素，只做「复制/粘贴/发 Ctrl+V」；五种模式跑在 ARM 原生的
+Java 里（`android/LiquifyWarp.java`，和 `liquify/engine/lq.c` 同一套模型）。
+
+## APK 打补丁流水线（macOS，无需 Gradle/pwsh）
+
+`android/build-apk.sh`：
+
+1. `apktool d -r` 解包**干净**的发行 APK（`Winlator-for-sai-0.3.30-...apk`）
+2. 删掉解码树里残留的 `Liquify*.smali`
+3. 在 `TouchpadView.updateXform` 的 `PenBridge.configure` 后注入
+   `LiquifyServer.start()`
+4. `apktool b` 重打包
+5. `javac` + `d8` 编译 `LiquifyWarp/LiquifyServer` → 新 dex
+6. 追加为 `classesN+1.dex`（apktool 可能已经生成 classes3，重名会被
+   apksigner 拒绝，脚本自动取下一个序号）
+7. `zipalign` + `apksigner`（`keys/debug.keystore`，SHA-256 `02:01:22:...`，
+   与已安装签名的同一个）→ `adb install -r`，容器数据保留
+
+踩过的坑：
+
+- 一开始拿「已经打过补丁的 APK」当 base，解包出来的 smali 里带着旧的
+  LiquifyServer，重打包后旧的 classes3.dex 会**抢先**被类加载器选中，
+  新代码永远不生效（表现为协议对不上、时间字段恒为 0）。
+- 协议是大端（Java `DataInputStream`），第一版 DLL 发的是主机小端，
+  服务端直接关闭连接。
+- apktool 在 `$HOME/Library/apktool` 建 framework 目录，沙箱下会失败；
+  脚本把 `HOME` 指到 `/private/tmp/apkhome`。
+
+## 实测
+
+| 项目 | 结果 |
+|---|---|
+| 协议端到端 | `LQNET: mode=forward 1600x1600 round trip 842ms` |
+| 导出 PNG 验证 | 红对角线 y=700→767、750→854、800→893、1000→1000，与 x86 引擎**完全一致** |
+| 桌面 JVM 基准 | forward 12–31ms；twirl/bloat/pinch/smooth 19–76ms |
+| 平板（warm） | forward java warp 54ms、round trip 82ms；twirl 115ms；pinch 74ms |
+| 平板（首次） | 仍有一次性 ~3.2s（ART 首次大缓冲/方法编译），**待下轮查** |
+
+优化：把 `sqrt/sin/cos` 全部搬出内层循环，用「d² → 权重/旋转/径向缩放」
+的 1024 项查找表，twirl 从 2.4s 降到 115ms（warm）。
+
+## 目前仍未完成
+
+1. **首次调用 3.2s**：prewarm 已经加在服务线程启动时（3 次 64×64），
+   但第一次 1600×1600 仍然慢，需要把「读图/分配/变形」分段计时。
+2. **交互与实时预览**：现在是「一次性算完 → 粘贴」，没有笔刷拖动和叠加窗预览。
+3. **多图层/文件夹/选区/蒙版**：读的仍是拼合结果，提交成新图层。
