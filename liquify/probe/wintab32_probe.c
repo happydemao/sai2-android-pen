@@ -1859,8 +1859,8 @@ static int WINAPI probe_SetDIBitsToDevice(HDC hdc, int x, int y, DWORD cx, DWORD
                         }
                     }
                     g_write_done = 1;
-                    gdi_log("WRITE TEST: painted 320x320 magenta at DIB (%d,%d) stride=%d",
-                            bx, by, g_cv_stride);
+                    gdi_log("WRITE TEST: painted 320x320 magenta at DIB (%d,%d) stride=%d bits=%p",
+                            bx, by, g_cv_stride, bits);
                     gdi_dump_canvas();
                     gdi_flush();
                 }
@@ -1872,6 +1872,7 @@ static int WINAPI probe_SetDIBitsToDevice(HDC hdc, int x, int y, DWORD cx, DWORD
                         w, h, g_cv_stride, g_cv_bpp, gdi_class_of(hdc), x, y, (int)cx, (int)cy, sx, sy, start, lines);
                 gdi_dump_canvas();
                 g_needle_ready = gdi_make_needle() ? 1 : 0;
+                gdi_flush();
             }
         }
     }
@@ -1990,6 +1991,42 @@ static void ms_run(void) {
     ms_log("done: %d regions (%d >=4MB), %d hits", regions, big, hits);
 }
 
+/* ---- code anchor: who writes the canvas DIB? -----------------------------
+ * The compositor is an internal SAI function with no import to hook. Put a
+ * PAGE_GUARD on one page of the canvas DIB and let the first write fault tell
+ * us the RIP that did it. Subtract the module base to get a stable file
+ * offset, then disassemble offline.
+ */
+static PVOID g_veh;
+static unsigned __int64 g_watch_addr;
+static volatile int g_watch_hits;
+
+static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
+    EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (er->ExceptionCode != STATUS_GUARD_PAGE_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    if (g_watch_hits >= 8) return EXCEPTION_CONTINUE_SEARCH;
+    unsigned __int64 fault = (unsigned __int64)(uintptr_t)er->ExceptionInformation[1];
+    HMODULE mod = NULL;
+    char name[MAX_PATH] = "";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)(uintptr_t)er->ExceptionAddress, &mod) && mod)
+        GetModuleFileNameA(mod, name, (int)sizeof name);
+    HMODULE exe = GetModuleHandleA(NULL);
+    ms_log("WATCH hit #%d fault=%p addr=%p rip=%p mod=%s(%p)+%llx",
+           g_watch_hits, (void*)(uintptr_t)fault, (void*)(uintptr_t)er->ExceptionAddress,
+           (void*)(uintptr_t)ep->ContextRecord->Rip,
+           name[0] ? name : "?", (void*)mod,
+           (unsigned long long)((unsigned __int64)(uintptr_t)ep->ContextRecord->Rip
+                                - (unsigned __int64)(uintptr_t)mod));
+    (void)exe;
+    ++g_watch_hits;
+    /* One-shot: make the page writable again so SAI is not stuck faulting. */
+    DWORD old;
+    VirtualProtect((LPVOID)(uintptr_t)(g_watch_addr & ~0xFFFull), 0x1000ull,
+                   PAGE_READWRITE, &old);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 /* ---- memory fingerprint / diff -------------------------------------------
  * Format-agnostic way to find where a document edit lands: hash every 64 KB
  * chunk of the process, make the user draw one dot, hash again, and dump the
@@ -2075,6 +2112,62 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
         Sleep(300);
+        if (GetFileAttributesA("C:\\wt_watch.txt") != INVALID_FILE_ATTRIBUTES) {
+            FILE *cf = fopen("C:\\wt_watch.txt", "r");
+            unsigned long long a = 0; unsigned int np = 1;
+            if (cf) { if (fscanf(cf, "%llx %u", &a, &np) != 2) np = 1; fclose(cf); }
+            DeleteFileA("C:\\wt_watch.txt");
+            if (np > 64) np = 64;
+            if (a) {
+                if (!g_veh) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+                g_watch_addr = a & ~0xFFFull;
+                g_watch_hits = 0;
+                DWORD old; int armed = 0;
+                for (unsigned int i = 0; i < np; ++i) {
+                    if (VirtualProtect((LPVOID)(uintptr_t)(g_watch_addr + (unsigned __int64)i * 0x1000),
+                                       0x1000ull, PAGE_READWRITE | PAGE_GUARD, &old))
+                        ++armed;
+                }
+                ms_log("WATCH armed %d page(s) at %llx", armed, g_watch_addr);
+            }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_poke.txt") != INVALID_FILE_ATTRIBUTES) {
+            FILE *cf = fopen("C:\\wt_poke.txt", "r");
+            unsigned long long a = 0; unsigned int len = 0;
+            if (cf) { if (fscanf(cf, "%llx %u", &a, &len) != 2) len = 0; fclose(cf); }
+            DeleteFileA("C:\\wt_poke.txt");
+            if (a && len && len <= (1u << 20)) {
+                FILE *pf = fopen("C:\\wt_poke.bin", "rb");
+                if (pf) {
+                    unsigned char *buf = (unsigned char*)malloc(len);
+                    size_t n = buf ? fread(buf, 1, len, pf) : 0;
+                    fclose(pf);
+                    if (n == len) {
+                        DWORD old;
+                        if (VirtualProtect((LPVOID)(uintptr_t)a, len, PAGE_READWRITE, &old)) {
+                            memcpy((void*)(uintptr_t)a, buf, len);
+                            VirtualProtect((LPVOID)(uintptr_t)a, len, old, &old);
+                            ms_log("poked %u bytes at %llx", len, a);
+                            if (g_cv_dst) InvalidateRect(g_cv_dst, NULL, FALSE);
+                            ms_log("invalidated canvas hwnd %p", (void*)g_cv_dst);
+                        } else {
+                            ms_log("poke protect failed at %llx", a);
+                        }
+                    } else {
+                        ms_log("poke short read %zu/%u", n, len);
+                    }
+                    free(buf);
+                }
+            }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_invalidate") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_invalidate");
+            if (g_cv_dst) InvalidateRect(g_cv_dst, NULL, TRUE);
+            ms_log("invalidated canvas hwnd %p", (void*)g_cv_dst);
+            continue;
+        }
         if (GetFileAttributesA("C:\\wt_snap") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_snap");
             snap_collect();
