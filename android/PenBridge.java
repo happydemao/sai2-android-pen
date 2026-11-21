@@ -359,12 +359,27 @@ B64_32_2
 
             // ---------------- 以下全部是笔的原有逻辑 ----------------
             // 1) 压感采样（笔自己会在抬笔后继续送悬停事件，不需要我们补）
-            // 笔的每个事件都把系统鼠标光标移到笔尖，包括 HOVER_MOVE。
-            // 原生 TouchpadView 只在拖动/按下时移动光标；SAI 的画笔圈却从一开始
-            // 就跟着悬停的笔，结果就是"圈在笔尖、系统光标还停在旧位置"。
+            // Android 把一帧内的笔样本合并进一个 MotionEvent 的 history；
+            // 这些历史样本全部送给 DLL（压力曲线不丢），但光标只在本事件末尾
+            // 移到最新点一次。每次 injectPointerMove 都要走 X server -> Wine ->
+            // SAI，按样本移动是 Box64 下最大的输入开销。
+            final int hist = ev.getHistorySize();
+            for (int h = 0; h < hist; h++) {
+                int[] hxy = toContainerAt(pad, ev.getHistoricalX(h), ev.getHistoricalY(h));
+                int[] hxys = toContainerScaledAt(pad, ev.getHistoricalX(h), ev.getHistoricalY(h));
+                if (hxy != null && hxys != null) {
+                    emit(hxys[0], hxys[1], ev.getHistoricalPressure(h),
+                         MotionEvent.ACTION_MOVE, false, true);
+                }
+            }
+
+            // 光标每个事件只移一次，移到最新样本。
             moveCursorTo(pad, x, y);
 
-            emit(sx, sy, pressure, action, false);
+            final boolean queueAll = action == MotionEvent.ACTION_MOVE
+                    || action == MotionEvent.ACTION_HOVER_MOVE
+                    || action == MotionEvent.ACTION_HOVER_ENTER;
+            emit(sx, sy, pressure, action, false, queueAll);
 
             // 2) 只有"鼠标型笔"才合成左键（正规 STYLUS 交给 Winlator 原生处理）
             if (!loggedPen) {
@@ -553,6 +568,37 @@ B64_32_2
                     xform, ev.getX(), ev.getY());
             if (p == null || p.length < 2) return null;
             return new int[]{ (int) p[0], (int) p[1] };
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static int[] toContainerAt(View pad, float vx, float vy) {
+        resolveReflection();
+        if (fXform == null || mTransformPoint == null) return null;
+        try {
+            float[] xform = (float[]) fXform.get(pad);
+            if (xform == null) return null;
+            float[] p = (float[]) mTransformPoint.invoke(null, xform, vx, vy);
+            if (p == null || p.length < 2) return null;
+            return new int[]{ (int) p[0], (int) p[1] };
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static int[] toContainerScaledAt(View pad, float vx, float vy) {
+        resolveReflection();
+        if (fXform == null || mTransformPoint == null) return null;
+        try {
+            float[] xform = (float[]) fXform.get(pad);
+            if (xform == null) return null;
+            float[] p = (float[]) mTransformPoint.invoke(null, xform, vx, vy);
+            if (p == null || p.length < 2) return null;
+            return new int[]{
+                    Math.round(p[0] * POS_SCALE),
+                    Math.round(p[1] * POS_SCALE)
+            };
         } catch (Throwable t) {
             return null;
         }
@@ -1509,6 +1555,11 @@ B64_32_2
     // ---------------------------------------------------------------- UDP 发送
 
     private static void emit(int x, int y, float pressure, int action, boolean simulateHover) {
+        emit(x, y, pressure, action, simulateHover, false);
+    }
+
+    private static void emit(int x, int y, float pressure, int action, boolean simulateHover,
+                             boolean queueAll) {
         try {
             if (disabled) return;
 
@@ -1566,7 +1617,16 @@ B64_32_2
                     // 同时丢掉这里之前排队的样本：抬笔/悬停的 p=0 若排在新一笔的 DOWN 之后发出，
                     // 会把刚起笔的这一笔立刻收掉（轻画时最明显——几乎没有墨）。
                     hasPending = false;
-                    if (CRIT.size() < 32) CRIT.add(new int[]{x, y, p});
+                    if (CRIT.size() < 512) CRIT.add(new int[]{x, y, p});
+                    LOCK.notifyAll();
+                    ensureWorker();
+                    return;
+                }
+                if (queueAll) {
+                    // 笔的 history 样本逐个进队列，保持压力曲线；不像手指那样只留最新点。
+                    hasPending = false;
+                    if (CRIT.size() >= 512) CRIT.pollFirst();
+                    CRIT.add(new int[]{x, y, p});
                     LOCK.notifyAll();
                     ensureWorker();
                     return;
