@@ -154,6 +154,21 @@ SaiPressureBridge.configure(xServer.screenInfo.width, xServer.screenInfo.height)
 6. **无压感设备**：`getToolType()==STYLUS` 但压力恒为 1.0 的机器（部分 USI 笔）会把笔压画成
    恒定最大。可在设置里给一个 "忽略压力" 开关 —— 这是取舍，不是 bug。
 
+### 3.4.1 坐标用 8 倍定点（减少直线抖动）
+
+报文里的位置只取比例 `x/w`、`y/h`，所以 `x y w h` 同时乘 8 不会改变位置，
+只把 Android 侧 1px 的量化误差降到 1/8px。DLL 自己的 `wtc_screen_to_sample()`
+也用了同样的 8 倍约定。
+
+0.3.10 起 `PenBridge` 发送的是：
+
+```
+"seq pressure (x*8) ((H-y)*8) (W*8) (H*8)"
+```
+
+关闭 SAI 的抖动修正后，直线上的细小台阶/抖动会明显减少；如果仍有笔硬件噪声，
+下一步可以在 Android 侧加 One Euro 低通，但那会引入几毫秒延迟。
+
 ### 3.5 编译
 
 Winlator 需要：Android SDK（compileSdk 34 左右）+ NDK + CMake，子模块要一起拉。

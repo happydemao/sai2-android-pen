@@ -39,6 +39,10 @@ public final class PenBridge {
     private static final String TAG = "SaiPen";
     private static final int PORT = 47800;
     private static final int PMAX = 4095;
+    /* 发送给 wintab32.dll 的坐标用 8 倍定点：协议里 x/w、y/h 只取比例，
+     * 所以 8 倍不会改变位置，只把 1px 量化误差降到 1/8px。DLL 自己的
+     * wtc_screen_to_sample() 也用了同样的 8 倍约定。 */
+    private static final int POS_SCALE = 8;
 
     /**
      * 落笔判据分两层：
@@ -302,8 +306,10 @@ B64_8
             }
 
             int[] xy = toContainer(pad, ev);
-            if (xy == null) return;
+            int[] xys = toContainerScaled(pad, ev);
+            if (xy == null || xys == null) return;
             final int x = xy[0], y = xy[1];
+            final int sx = xys[0], sy = xys[1];
 
             // 诊断：只对 DOWN 记录一次原始/变换后坐标，确认为什么画笔会贴边
             if (action == MotionEvent.ACTION_DOWN) {
@@ -315,7 +321,7 @@ B64_8
             }
 
             if (!pen) {
-                handleFingerTouch(pad, ev, consumed, x, y);
+                handleFingerTouch(pad, ev, consumed, sx, sy);
                 return;
             }
 
@@ -326,7 +332,7 @@ B64_8
             // 就跟着悬停的笔，结果就是"圈在笔尖、系统光标还停在旧位置"。
             moveCursorTo(pad, x, y);
 
-            emit(x, y, pressure, action, false);
+            emit(sx, sy, pressure, action, false);
 
             // 2) 只有"鼠标型笔"才合成左键（正规 STYLUS 交给 Winlator 原生处理）
             if (!loggedPen) {
@@ -962,6 +968,24 @@ B64_8
         }
     }
 
+    /** 发送用坐标：容器坐标 * POS_SCALE，保留 1/8px 精度。 */
+    private static int[] toContainerScaled(View pad, MotionEvent ev) {
+        resolveReflection();
+        if (fXform == null || mTransformPoint == null) return null;
+        try {
+            float[] xform = (float[]) fXform.get(pad);
+            if (xform == null) return null;
+            float[] p = (float[]) mTransformPoint.invoke(null, xform, ev.getX(), ev.getY());
+            if (p == null || p.length < 2) return null;
+            return new int[]{
+                    Math.round(p[0] * POS_SCALE),
+                    Math.round(p[1] * POS_SCALE)
+            };
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /**
      * 虚拟鼠标按钮按下时，把 X 光标移到手指触点。
      *
@@ -1481,7 +1505,7 @@ B64_8
                     if (simulateHover) {
                         if (CRIT.size() > 28) CRIT.clear();
                         // 靠右边缘时往外挪会被 send() 夹到同一个像素，往回挪
-                        final int dx = (x + 2 < screenW) ? 1 : -1;
+                        final int dx = (x + 2 * POS_SCALE < screenW * POS_SCALE) ? POS_SCALE : -POS_SCALE;
                         CRIT.add(new int[]{x, y, 0});
                         CRIT.add(new int[]{x + dx, y, 0});
                         CRIT.add(new int[]{x + 2 * dx, y, 0});
@@ -1606,12 +1630,14 @@ B64_8
     }
 
     private static void send(int x, int y, int p) {
-        if (x < 0) x = 0; else if (x >= screenW) x = screenW - 1;
-        if (y < 0) y = 0; else if (y >= screenH) y = screenH - 1;
+        final int wireW = screenW * POS_SCALE;
+        final int wireH = screenH * POS_SCALE;
+        if (x < 0) x = 0; else if (x >= wireW) x = wireW - 1;
+        if (y < 0) y = 0; else if (y >= wireH) y = wireH - 1;
 
-        int wireY = screenH - y;      // 报文 y 从底部量
+        int wireY = wireH - y;        // 报文 y 从底部量
 
-        String msg = seq + " " + p + " " + x + " " + wireY + " " + screenW + " " + screenH;
+        String msg = seq + " " + p + " " + x + " " + wireY + " " + wireW + " " + wireH;
         byte[] data = msg.getBytes(StandardCharsets.US_ASCII);
         try {
             socket.send(new DatagramPacket(data, data.length, loopback, PORT));
