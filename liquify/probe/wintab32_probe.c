@@ -576,7 +576,9 @@ static void emit_sample(const SAMPLE *s) {
     pk.status = 0;
     pk.cursor = 0;
     pk.buttons  = down ? 1 : 0;
-    pk.cursor   = g_eraser ? 2 : 1;
+    /* the pen keeps the index it always had (0); the eraser end reports
+     * cursor 2, which is what WinTab apps switch their eraser tool on */
+    pk.cursor   = g_eraser ? 2 : 0;
     pk.pressure = down ? (UINT)s->press : 0;
     g_last_press = down ? (int)pk.pressure : 0;
     if (g_last_press > g_ui_press_max) g_ui_press_max = g_last_press;
@@ -3001,6 +3003,31 @@ static HWND g_ui_hwnd;
 static HDC g_ui_dc;
 static HBITMAP g_ui_bmp;
 static unsigned char *g_ui_bits;
+typedef struct { HWND best; LONG area; } UiCanvasFind;
+
+static BOOL CALLBACK ui_enum_canvas(HWND h, LPARAM lp) {
+    UiCanvasFind *st = (UiCanvasFind *)lp;
+    RECT r;
+    if (!IsWindowVisible(h)) return TRUE;
+    GetClientRect(h, &r);
+    LONG a = (r.right - r.left) * (r.bottom - r.top);
+    if (r.right - r.left < 200 || r.bottom - r.top < 150) return TRUE;
+    char cls[64] = "";
+    GetClassNameA(h, cls, (int)sizeof cls - 1);
+    if (strstr(cls, "sfl") && a > st->area) { st->best = h; st->area = a; }
+    return TRUE;
+}
+
+/* The canvas child is where the document is drawn. The GDI hooks discover it
+ * when the capture switch is on, but the plugin must work without them. */
+static HWND ui_canvas_hwnd(void) {
+    if (g_cv_dst && IsWindow(g_cv_dst)) return g_cv_dst;
+    if (!g_hwnd) return NULL;
+    UiCanvasFind st = { NULL, 0 };
+    EnumChildWindows(g_hwnd, ui_enum_canvas, (LPARAM)&st);
+    return st.best ? st.best : g_hwnd;
+}
+
 static void ui_update_window(void);
 static void ui_render_rect(int dx0, int dy0, int dx1, int dy1);
 static void ui_commit(void);
@@ -3322,9 +3349,13 @@ static DWORD WINAPI ui_thread(LPVOID p) {
 
     /* 3. paper rect: zoom from the title, origin from the last blit so a
      * scrolled / 100% document is covered correctly, clipped to the canvas. */
-    RECT rc; GetClientRect(g_cv_dst, &rc);
-    POINT o = { 0, 0 }; ClientToScreen(g_cv_dst, &o);
-    char title[128] = ""; GetWindowTextA(g_cv_dst, title, (int)sizeof title - 1);
+    HWND canvas = ui_canvas_hwnd();
+    RECT rc;
+    POINT o = { 0, 0 };
+    if (canvas) { GetClientRect(canvas, &rc); ClientToScreen(canvas, &o); }
+    else { rc.left = 0; rc.top = 0; rc.right = g_screenW; rc.bottom = g_screenH; }
+    char title[128] = "";
+    if (canvas) GetWindowTextA(canvas, title, (int)sizeof title - 1);
     int zoom = 100;
     const char *pc = strrchr(title, '(');
     if (pc) zoom = atoi(pc + 1);
@@ -3375,6 +3406,19 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     g_ui_y = vt - UI_BAR_H;
     g_ui_offx = (float)(vl - pl) / g_ui_sc;
     g_ui_offy = (float)(vt - pt) / g_ui_sc;
+    /* A small document (or a high zoom) makes the paper narrower than the
+     * toolbar, which shrinks the buttons to a few pixels. Keep the bar at a
+     * usable width and let the paper sit inside the wider window. */
+    if (g_ui_w < 620) {
+        int wl = vl;
+        if (wl + 620 > o.x + rc.right) wl = o.x + rc.right - 620;
+        if (wl < o.x) wl = o.x;
+        int wr = wl + 620;
+        if (wr > o.x + rc.right) wr = o.x + rc.right;
+        g_ui_w = wr - wl;
+        g_ui_x = wl;
+        g_ui_offx = (float)(wl - pl) / g_ui_sc;
+    }
 
     /* 4. surface + window */
     BITMAPINFO bi; memset(&bi, 0, sizeof bi);
