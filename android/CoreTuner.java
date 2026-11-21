@@ -286,7 +286,9 @@ final class CoreTuner {
 
     private static String readSmall(File f) {
         try {
-            byte[] b = new byte[(int) Math.min(f.length(), 4096)];
+            /* /proc and /sys files often report length 0, so never size the
+             * buffer from File.length(). */
+            byte[] b = new byte[4096];
             FileInputStream in = new FileInputStream(f);
             try {
                 int n = in.read(b);
