@@ -3304,6 +3304,36 @@ static DWORD WINAPI ui_thread(LPVOID p) {
         /* The Winlator input path does not surface the keyboard or mouse
          * button state to Wine (GetAsyncKeyState stays 0), so the commit and
          * cancel actions are also exposed as files for now. */
+        if (GetFileAttributesA("C:\\wt_ui_undo") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_ui_undo");
+            if (g_ui.ctx && lq_undo(g_ui.ctx)) {
+                ui_render_rect(0, 0, g_ui.dw - 1, g_ui.dh - 1);
+                ui_update_window();
+                ms_log("UI: undo");
+            }
+        }
+        if (GetFileAttributesA("C:\\wt_ui_mode") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_ui_mode");
+            FILE *mf = fopen("C:\\wt_ui.txt", "r");
+            char mm[32] = "forward";
+            int mr = g_ui.radius; float mst = g_ui.strength;
+            if (mf) {
+                if (fscanf(mf, "%31s %d %f", mm, &mr, &mst) < 1) strcpy(mm, "forward");
+                fclose(mf);
+            }
+            int newmode = 0;
+            if (!strcmp(mm, "bloat")) newmode = 1;
+            else if (!strcmp(mm, "pinch")) newmode = 2;
+            else if (!strcmp(mm, "twirl_cw")) newmode = 3;
+            else if (!strcmp(mm, "twirl_ccw")) newmode = 4;
+            else if (!strcmp(mm, "smooth")) newmode = 5;
+            g_ui.mode = newmode;
+            g_ui.radius = mr;
+            g_ui.strength = mst;
+            /* a new stroke starts a fresh field, matching lq.c's stroke model */
+            if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
+            ms_log("UI: mode=%s radius=%d strength=%.2f", mm, mr, mst);
+        }
         if (GetFileAttributesA("C:\\wt_ui_done") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_ui_done");
             ui_commit(); ui_close(); break;

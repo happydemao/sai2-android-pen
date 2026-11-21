@@ -25,5 +25,15 @@ export SERIAL PKG USERDIR P
 A shell "am force-stop $PKG" || true
 sleep 2
 A shell "am force-stop $PKG" || true
+# Winlator's container runs under proot and can outlive force-stop; SAI would
+# keep the previous wintab32.dll loaded, silently ignoring the new build.
+for i in 1 2 3; do
+    sleep 2
+    PIDS=$(A shell "run-as $PKG pidof sai2.exe 2>/dev/null" | tr -d '\r')
+    [ -z "$PIDS" ] && break
+    for pid in $PIDS; do
+        A shell "run-as $PKG kill -9 $pid" 2>/dev/null || true
+    done
+done
 A shell "run-as $PKG ls -la $P/windows/system32/wintab32.dll"
 "$HERE/launch_sai.sh"

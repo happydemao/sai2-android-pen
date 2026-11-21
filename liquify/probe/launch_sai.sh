@@ -29,21 +29,23 @@ print(w)
 EOF
 )
 case "$W" in
-  2560) X=148; Y=522 ;;   # tablet 2560x1600 landscape
-  2400) X=291; Y=638 ;;   # phone 2400x1080 landscape
-  1600) X=231; Y=549 ;;   # portrait fallback
-  *)    X=290; Y=640 ;;
+  2560) XLIST="148,522" ;;
+  2400) XLIST="591,632 291,638" ;;   # two known shortcut layouts on the phone
+  1600) XLIST="231,549" ;;
+  *)    XLIST="290,640" ;;
 esac
-echo "screen width $W -> tap $X,$Y"
-A shell input tap "$X" "$Y"
-
-for i in $(seq 1 40); do
-    sleep 2
-    AGE=$(A shell "run-as $PKG sh -c 'echo \$(( \$(date +%s) - \$(stat -c %Y $P/wt_status.txt 2>/dev/null || echo 0) ))'" | tr -d '\r')
-    if [ "${AGE:-999}" -lt 5 ] 2>/dev/null; then
-        echo "SAI up (status ${AGE}s old)"
-        exit 0
-    fi
+echo "screen width $W -> tap candidates: $XLIST"
+for XY in $XLIST; do
+    X=${XY%,*}; Y=${XY#*,}
+    A shell input tap "$X" "$Y"
+    for i in $(seq 1 18); do
+        sleep 2
+        AGE=$(A shell "run-as $PKG sh -c 'echo \$(( \$(date +%s) - \$(stat -c %Y $P/wt_status.txt 2>/dev/null || echo 0) ))'" | tr -d '\r')
+        if [ "${AGE:-999}" -lt 5 ] 2>/dev/null; then
+            echo "SAI up (status ${AGE}s old) after tap $X,$Y"
+            exit 0
+        fi
+    done
 done
 echo "SAI did not come up" >&2
 A exec-out screencap -p > /private/tmp/launch_failed.png
