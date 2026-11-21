@@ -2651,24 +2651,43 @@ static void doc_paste(void) {
     fclose(pf);
     if (!img || got != imgsz) { free(img); ms_log("PASTE: short read %zu/%zu", got, imgsz); return; }
 
-    size_t total = sizeof(BITMAPINFOHEADER) + imgsz;
+    /* Publish CF_DIBV5 only: when both formats are present SAI reads CF_DIB
+     * (no alpha) and composites transparent pixels as opaque black, which made
+     * an aligned, padded paste turn the canvas black. DIBV5 carries the alpha
+     * mask, so the padding stays transparent and the content lands where it was
+     * copied from. */
+    size_t total = sizeof(BITMAPV5HEADER) + 12 + imgsz;
     HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, total);
     if (!mem) { free(img); ms_log("PASTE: alloc failed"); return; }
     unsigned char *p = (unsigned char*)GlobalLock(mem);
     if (!p) { GlobalFree(mem); free(img); ms_log("PASTE: lock failed"); return; }
-    BITMAPINFOHEADER *ih = (BITMAPINFOHEADER*)p;
-    memset(ih, 0, sizeof *ih);
-    ih->biSize = sizeof *ih; ih->biWidth = w; ih->biHeight = h;
-    ih->biPlanes = 1; ih->biBitCount = 32; ih->biCompression = BI_RGB;
-    ih->biSizeImage = (DWORD)imgsz;
-    for (int y = 0; y < h; ++y)
-        memcpy(p + sizeof *ih + (size_t)y * stride, img + (size_t)(h - 1 - y) * stride, stride);
+    BITMAPV5HEADER *v5 = (BITMAPV5HEADER*)p;
+    memset(v5, 0, sizeof *v5);
+    v5->bV5Size = sizeof *v5;
+    v5->bV5Width = w;
+    v5->bV5Height = h;                 /* positive = bottom-up */
+    v5->bV5Planes = 1;
+    v5->bV5BitCount = 32;
+    v5->bV5Compression = BI_BITFIELDS;
+    v5->bV5SizeImage = (DWORD)imgsz;
+    v5->bV5RedMask   = 0x00FF0000u;
+    v5->bV5GreenMask = 0x0000FF00u;
+    v5->bV5BlueMask  = 0x000000FFu;
+    v5->bV5AlphaMask = 0xFF000000u;
+    v5->bV5CSType = 0;
+    {
+        uint32_t masks[3] = { v5->bV5RedMask, v5->bV5GreenMask, v5->bV5BlueMask };
+        memcpy(p + sizeof *v5, masks, sizeof masks);      /* GDI repeats the colour masks */
+        unsigned char *dst = p + sizeof *v5 + 12;
+        for (int y = 0; y < h; ++y)
+            memcpy(dst + (size_t)y * stride, img + (size_t)(h - 1 - y) * stride, stride);
+    }
     GlobalUnlock(mem);
     free(img);
     if (!OpenClipboard(NULL)) { GlobalFree(mem); ms_log("PASTE: OpenClipboard failed"); return; }
     EmptyClipboard();
-    if (!SetClipboardData(CF_DIB, mem)) { GlobalFree(mem); ms_log("PASTE: SetClipboardData failed"); }
-    else ms_log("PASTE: %dx%d CF_DIB placed (send Ctrl+V)", w, h);
+    if (!SetClipboardData(CF_DIBV5, mem)) { GlobalFree(mem); ms_log("PASTE: SetClipboardData(DIBV5) failed"); }
+    else ms_log("PASTE: %dx%d CF_DIBV5 placed (send Ctrl+V)", w, h);
     CloseClipboard();
 }
 
@@ -3349,11 +3368,22 @@ static void send_plain_key(char c) {
 static void ui_commit(void) {
     if (!g_ui.doc) return;
     int w = g_ui.dw, h = g_ui.dh;
-    unsigned char *img = g_ui.doc;
+    unsigned char *img = g_ui.doc, *pad = NULL;
+    if (g_doc_offx > 0 || g_doc_offy > 0) {
+        int pw = w + g_doc_offx, ph = h + g_doc_offy;
+        pad = (unsigned char*)calloc((size_t)pw * 4 * ph, 1);
+        if (pad) {
+            for (int y = 0; y < h; ++y)
+                memcpy(pad + ((size_t)(y + g_doc_offy) * pw + g_doc_offx) * 4,
+                       g_ui.doc + (size_t)y * w * 4, (size_t)w * 4);
+            img = pad; w = pw; h = ph;
+        }
+    }
     FILE *f = fopen("C:\\wt_paste.bin", "wb");
     if (f) { fwrite(img, 1, (size_t)w * 4 * h, f); fclose(f); }
     FILE *t = fopen("C:\\wt_paste.txt", "wb");
     if (t) { fprintf(t, "%d %d", w, h); fclose(t); }
+    free(pad);
     doc_paste();
     /* the overlay owns the focus; hand it back to SAI or the Ctrl+V lands on
      * the (about to be destroyed) overlay window */
