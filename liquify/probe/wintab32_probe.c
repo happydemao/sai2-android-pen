@@ -3086,8 +3086,11 @@ static int g_ui_clicks;                        /* taps seen, so a tap can act */
 
 static const char *UI_MODES[6] = { "FWD", "BLT", "PNC", "CW", "CCW", "SMO" };
 
+#define UI_BTN_N 11
+static int g_ui_merge;   /* merge into the layer below after commit */
+
 static void ui_bar_rect(int i, RECT *r) {
-    int bw = g_ui_w / 10;
+    int bw = g_ui_w / UI_BTN_N;
     if (bw < 24) bw = 24;
     r->left = i * bw;
     r->right = r->left + bw - 2;
@@ -3101,9 +3104,9 @@ static void ui_draw_bar(void) {
     FillRect(g_ui_dc, &all, bg);
     DeleteObject(bg);
     SetBkMode(g_ui_dc, TRANSPARENT);
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < UI_BTN_N; ++i) {
         RECT r; ui_bar_rect(i, &r);
-        int active = (i < 6 && i == g_ui.mode);
+        int active = (i < 6 && i == g_ui.mode) || (i == 6 && g_ui_merge);
         HBRUSH b = CreateSolidBrush(active ? RGB(0, 120, 215) : RGB(70, 70, 70));
         FillRect(g_ui_dc, &r, b);
         DeleteObject(b);
@@ -3111,9 +3114,10 @@ static void ui_draw_bar(void) {
         const char *label;
         char buf[8];
         if (i < 6) label = UI_MODES[i];
-        else if (i == 6) label = "R-";
-        else if (i == 7) label = "R+";
-        else if (i == 8) label = "OK";
+        else if (i == 6) label = "MRG";
+        else if (i == 7) label = "R-";
+        else if (i == 8) label = "R+";
+        else if (i == 9) label = "OK";
         else label = "X";
         TextOutA(g_ui_dc, r.left + 4, r.top + 8, label, (int)strlen(label));
         (void)buf;
@@ -3127,13 +3131,14 @@ static void ui_draw_bar(void) {
 
 static void ui_bar_click(int ox, int oy) {
     (void)oy;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < UI_BTN_N; ++i) {
         RECT r; ui_bar_rect(i, &r);
         if (ox < r.left || ox > r.right) continue;
         if (i < 6) g_ui.mode = i;
-        else if (i == 6) { g_ui.radius = g_ui.radius > 16 ? g_ui.radius - 16 : 8; }
-        else if (i == 7) { g_ui.radius += 16; }
-        else if (i == 8) { ui_commit(); ui_close(); return; }
+        else if (i == 6) g_ui_merge = !g_ui_merge;
+        else if (i == 7) { g_ui.radius = g_ui.radius > 16 ? g_ui.radius - 16 : 8; }
+        else if (i == 8) { g_ui.radius += 16; }
+        else if (i == 9) { ui_commit(); ui_close(); return; }
         else { ui_close(); return; }
         if (g_ui.ctx) { lq_destroy(g_ui.ctx); g_ui.ctx = NULL; }
         ui_draw_bar();
@@ -3189,7 +3194,15 @@ static void ui_commit(void) {
     if (g_hwnd) { SetForegroundWindow(g_hwnd); SetFocus(g_hwnd); }
     Sleep(250);
     send_ctrl_key('V');
-    ms_log("UI: committed %dx%d as a new layer", g_ui.dw, g_ui.dh);
+    if (g_ui_merge) {
+        /* 图层 → 合并图层 (Ctrl+E): replaces the layer below, which is what
+         * "liquify in place" means for a single-layer document. */
+        Sleep(600);
+        send_ctrl_key('E');
+        ms_log("UI: committed %dx%d and merged down", g_ui.dw, g_ui.dh);
+    } else {
+        ms_log("UI: committed %dx%d as a new layer", g_ui.dw, g_ui.dh);
+    }
 }
 
 static void ui_close(void) {
