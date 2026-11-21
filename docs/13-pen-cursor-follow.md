@@ -47,3 +47,22 @@ moveCursorTo(pad, x, y);   // xServer.injectPointerMove(x, y)
 
 `android/PenBridge.java` 已更新，重新编译 `classes2.dex` 即可；`classes.dex` 不需要改。
 产物：`Winlator-11.2-SAIPen-0.3.6.apk`。
+
+## 补充：不强制手指移动光标；虚拟鼠标按钮单独处理（0.3.9）
+
+曾尝试让 `setMoveCursorToTouchpoint()` 恒为 `true`，结果手指画线会“连笔”，已撤回。
+现在保持 Winlator 原有设置：普通手指触摸不强制移动系统光标。
+
+真正需要移动光标的是 **InputControlsView 的虚拟鼠标按钮**：它只注入
+`injectPointerButtonPress/Release`，不会移动 X 指针，所以光标不在按钮上时，
+点击会落在旧位置，表现为“虚拟按钮点不动”。
+
+修复方式：
+
+- `ControlElement.handleTouchDown()` 的 BUTTON 分支先调用
+  `PenBridge.moveCursorForVirtualButton(element, x, y)`；
+- 该方法只在绑定里含 `MOUSE_LEFT/MIDDLE/RIGHT/SCROLL` 时生效，
+  用 `TouchpadView.xform` 把手指坐标转成容器坐标，再 `injectPointerMove`；
+- Ctrl/Shift 等键盘按钮不会移动光标。
+
+对应 smali 补丁在 `build-apk.ps1` 的 `control element mouse cursor` 步骤。

@@ -333,6 +333,30 @@ $t = Patch-Once $t @'
 '@ 'LocaleHelper env locale'
 [System.IO.File]::WriteAllText($lh, $t, (New-Object System.Text.UTF8Encoding($false)))
 
+# ------------------------------------------- 3d. virtual mouse buttons move cursor
+# InputControlsView buttons only inject button press/release; they never move the
+# X pointer. If the cursor is elsewhere, tapping a virtual left/right-click button
+# clicks at the old position (or does nothing). Move the pointer to the finger
+# position first, but only for buttons whose binding is a mouse button.
+Step 'Patch ControlElement.smali (virtual mouse buttons)'
+$ce = Join-Path $smaliDir 'com\winlator\inputcontrols\ControlElement.smali'
+$t = NormalizeLF (Get-Content $ce -Raw -Encoding UTF8)
+$t = Patch-Once $t @'
+    if-ne v0, v1, :cond_5d
+
+    .line 819
+    invoke-direct {p0}, Lcom/winlator/inputcontrols/ControlElement;->isKeepButtonPressedAfterMinTime()Z
+'@ @'
+    if-ne v0, v1, :cond_5d
+
+    # Virtual mouse buttons: move the X cursor to the finger position first.
+    invoke-static {p0, p2, p3}, Lcom/winlator/sai/PenBridge;->moveCursorForVirtualButton(Ljava/lang/Object;FF)V
+
+    .line 819
+    invoke-direct {p0}, Lcom/winlator/inputcontrols/ControlElement;->isKeepButtonPressedAfterMinTime()Z
+'@ 'control element mouse cursor'
+[System.IO.File]::WriteAllText($ce, $t, (New-Object System.Text.UTF8Encoding($false)))
+
 # --------------------------------------------------------------- 4. assemble
 Step 'smali assemble'
 $newDex = Join-Path $stage 'classes-patched.dex'

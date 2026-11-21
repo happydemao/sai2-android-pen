@@ -106,6 +106,13 @@ public final class PenBridge {
     private static Field fNativeNumFingers;
     private static Field fNativeScrolling;
 
+    /* 虚拟按键（InputControlsView 上的按钮）：按下鼠标类按钮前，先把系统光标
+     * 移到手指位置。否则点击会落在旧光标处，表现为“虚拟按钮点不动”。 */
+    private static Field fControlBindings;
+    private static Field fControlInputControlsView;
+    private static Method mBindingGetPointerButton;
+    private static Method mInputControlsGetTouchpadView;
+
     /** 我们合成出来的左键是否处于按下状态。 */
     private static boolean penDown;
     /* 手指按下期间（按下由 Winlator 原生补丁处理，我们只负责兜底松手） */
@@ -952,6 +959,56 @@ B64_8
             return new int[]{(int) p[0], (int) p[1]};
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    /**
+     * 虚拟鼠标按钮按下时，把 X 光标移到手指触点。
+     *
+     * InputControlsView 的按钮只注入 button press/release，不移动指针，所以
+     * 光标停在别处时点击会落在旧位置。这里只对“绑定里含鼠标按键”的按钮生效，
+     * Ctrl/Shift 这类键盘按钮不会让光标乱跳。
+     *
+     * smali: ControlElement.handleTouchDown 的 BUTTON 分支调用。
+     */
+    public static void moveCursorForVirtualButton(Object element, float x, float y) {
+        if (element == null) return;
+        try {
+            if (fControlBindings == null) {
+                fControlBindings = element.getClass().getDeclaredField("bindings");
+                fControlBindings.setAccessible(true);
+            }
+            Object arr = fControlBindings.get(element);
+            if (!(arr instanceof Object[])) return;
+
+            boolean mouseButton = false;
+            for (Object binding : (Object[]) arr) {
+                if (binding == null) continue;
+                if (mBindingGetPointerButton == null) {
+                    mBindingGetPointerButton = binding.getClass().getMethod("getPointerButton");
+                }
+                if (mBindingGetPointerButton.invoke(binding) != null) {
+                    mouseButton = true;
+                    break;
+                }
+            }
+            if (!mouseButton) return;
+
+            if (fControlInputControlsView == null) {
+                fControlInputControlsView = element.getClass().getDeclaredField("inputControlsView");
+                fControlInputControlsView.setAccessible(true);
+            }
+            Object icv = fControlInputControlsView.get(element);
+            if (icv == null) return;
+            if (mInputControlsGetTouchpadView == null) {
+                mInputControlsGetTouchpadView = icv.getClass().getMethod("getTouchpadView");
+            }
+            Object pad = mInputControlsGetTouchpadView.invoke(icv);
+            if (!(pad instanceof View)) return;
+
+            int[] p = toContainerPoint((View) pad, x, y);
+            if (p != null) moveCursorTo((View) pad, p[0], p[1]);
+        } catch (Throwable ignored) {
         }
     }
 
