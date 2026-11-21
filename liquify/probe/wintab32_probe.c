@@ -82,6 +82,8 @@ typedef struct {
 
 #define MAX_PRESS_CEILING 8191
 static int g_max_press = 1023;
+static void send_plain_key(char c);
+static void ensure_plugin_threads(void);
 static int g_last_press;                       /* last WinTab pressure (0..4095) */
 static volatile int g_eraser;                  /* pen's eraser end is down */
 static int g_ui_press_max;
@@ -1403,6 +1405,9 @@ static DWORD WINAPI producer(LPVOID arg) {
                     if (g_eraser != ctl.eraser) {
                         g_eraser = ctl.eraser;
                         log_line("ERASER %d", ctl.eraser);
+                        /* SAI ignores the WinTab cursor index, but its own tool
+                         * shortcuts work: E = eraser, N = brush. */
+                        send_plain_key(g_eraser ? 'e' : 'n');
                     }
                 }
                 else                          wake_datagram(ctl.wake);
@@ -1546,6 +1551,7 @@ static int host_is_sai(void) {
 }
 
 UINT WINAPI wt_info_sai_w(UINT cat, UINT idx, LPVOID out) {
+    ensure_plugin_threads();
     log_line("WTInfoW cat=%u idx=%u out=%p", cat, idx, out);
     switch (cat) {
     case 0: return 200;
@@ -1609,6 +1615,7 @@ static void fill_default_context_a(LOGCONTEXTA *lc) {
 
 
 UINT WINAPI wt_info_sai_a(UINT cat, UINT idx, LPVOID out) {
+    ensure_plugin_threads();
     log_line("WTInfoA cat=%u idx=%u out=%p", cat, idx, out);
     switch (cat) {
     case 0: return 200;
@@ -3212,6 +3219,17 @@ static void ui_update_window(void) {
     ReleaseDC(NULL, screen);
 }
 
+static void send_plain_key(char c);
+
+static void send_plain_key(char c) {
+    SHORT vk = (SHORT)VkKeyScanA(c);
+    if (vk == -1) return;
+    BYTE v = (BYTE)(vk & 0xFF);
+    keybd_event(v, 0, 0, 0);
+    Sleep(30);
+    keybd_event(v, 0, KEYEVENTF_KEYUP, 0);
+}
+
 static void ui_commit(void) {
     if (!g_ui.doc) return;
     FILE *f = fopen("C:\\wt_paste.bin", "wb");
@@ -3311,12 +3329,6 @@ static DWORD WINAPI ui_thread(LPVOID p) {
         SetFocus(g_hwnd);
         Sleep(400);
     }
-    {
-        HWND fg = GetForegroundWindow();
-        char fc[64] = "", ft[96] = "";
-        if (fg) { GetClassNameA(fg, fc, (int)sizeof fc - 1); GetWindowTextA(fg, ft, (int)sizeof ft - 1); }
-        ms_log("UI: foreground=%p class=%s title=%s", (void*)fg, fc, ft);
-    }
     /* 1. capture the document through SAI's own clipboard copy.
      * Deselect first: with an active selection Ctrl+C copies just its bounding
      * box, which looks like a "wrong paper size" to the user. Ctrl+A alone
@@ -3392,8 +3404,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
         }
     }
     int vl = pl, vt = pt, vr = pl + pw, vb = pt + ph;
-    ms_log("UI: geom doc=%dx%d zoom=%d paper=%d,%d %dx%d blit=(%d,%d from %d,%d)",
-           w, h, zoom, pl, pt, pw, ph, g_cv_x, g_cv_y, g_cv_sx, g_cv_sy);
+    ms_log("UI: geom doc=%dx%d zoom=%d paper=%d,%d %dx%d", w, h, zoom, pl, pt, pw, ph);
     if (vl < o.x) vl = o.x;
     if (vt < o.y) vt = o.y;
     if (vr > o.x + rc.right) vr = o.x + rc.right;
@@ -3604,6 +3615,14 @@ static DWORD WINAPI hotkey_thread(LPVOID p) {
 /* The Android-side button drops C:\wt_ui into the container; this watcher
  * turns it into an overlay. It runs from the first WTOpen, independent of the
  * GDI capture hooks, so the plugin can be opened without any debug switches. */
+static void ensure_plugin_threads(void) {
+    static LONG once = 0;
+    if (InterlockedCompareExchange(&once, 1, 0) == 0) {
+        CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
+        CreateThread(NULL, 0, ui_watcher_thread, NULL, 0, NULL);
+    }
+}
+
 static DWORD WINAPI ui_watcher_thread(LPVOID p) {
     (void)p;
     for (;;) {
@@ -3906,11 +3925,7 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
                                : "SAI keeps its area until restarted");
     }
     g_open = enable ? TRUE : FALSE;
-    if (!g_hotkey_started) {
-        g_hotkey_started = 1;
-        CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
-        CreateThread(NULL, 0, ui_watcher_thread, NULL, 0, NULL);
-    }
+    ensure_plugin_threads();
     if (lc) {
         log_ctx("WTOpenW ctx from app", lc);
         EnterCriticalSection(&g_cs);
