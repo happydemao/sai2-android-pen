@@ -3461,6 +3461,48 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     return 0;
 }
 
+/* ---- global hotkey entry point (Ctrl+Alt+L) ----------------------------
+ * The plugin should not need a trigger file. A message-only window in its own
+ * thread registers the hotkey; WM_HOTKEY starts the overlay on the current
+ * canvas. Registration result is logged so a conflict is visible.
+ */
+static DWORD WINAPI ui_thread(LPVOID p);
+static HWND g_hotkey_wnd;
+static int g_hotkey_started;
+
+static LRESULT CALLBACK hotkey_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_HOTKEY && w == 1) {
+        if (!g_ui_hwnd) CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
+        return 0;
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static DWORD WINAPI hotkey_thread(LPVOID p) {
+    (void)p;
+    WNDCLASSA wc;
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = hotkey_wndproc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "LiquifyHotkey";
+    RegisterClassA(&wc);
+    g_hotkey_wnd = CreateWindowA("LiquifyHotkey", "", 0, 0, 0, 0, 0,
+                                 HWND_MESSAGE, NULL, wc.hInstance, NULL);
+    if (!g_hotkey_wnd) { ms_log("HOTKEY: no message window"); return 0; }
+    if (!RegisterHotKey(g_hotkey_wnd, 1, MOD_CONTROL | MOD_ALT, 'L')) {
+        ms_log("HOTKEY: Ctrl+Alt+L registration failed (%lu)", GetLastError());
+        return 0;
+    }
+    ms_log("HOTKEY: Ctrl+Alt+L registered, plugin ready");
+    MSG msg;
+    while (GetMessageA(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+    UnregisterHotKey(g_hotkey_wnd, 1);
+    return 0;
+}
+
 static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
@@ -3749,6 +3791,10 @@ HANDLE WINAPI WTOpenW(HWND hwnd, LOGCONTEXTW *lc, BOOL enable) {
                                : "SAI keeps its area until restarted");
     }
     g_open = enable ? TRUE : FALSE;
+    if (!g_hotkey_started) {
+        g_hotkey_started = 1;
+        CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
+    }
     if (lc) {
         log_ctx("WTOpenW ctx from app", lc);
         EnterCriticalSection(&g_cs);

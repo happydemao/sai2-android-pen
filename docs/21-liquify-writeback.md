@@ -683,3 +683,20 @@ green px ~79k, bbox (100,100)-(354,472)
 
 要做真正的「只液化当前图层」，需要读图层面板（自绘），下一步可以试：
 从视口 DIB 里定位图层缩略图/眼睛图标，按行推断图层数与可见性。
+
+## 热键入口：Ctrl+Alt+L（2026-11-22 02:12）
+
+插件不再依赖触发文件：DLL 在第一次 `WTOpen` 时起一个 message-only 窗口线程，
+注册全局热键 **Ctrl+Alt+L**，按一下就开叠加层。
+
+```
+HOTKEY: Ctrl+Alt+L registered, plugin ready
+（按 Ctrl+Alt+L 后）
+UI: 1600x1600 doc, paper 528x528 at 974,111, mode=forward radius=120 strength=0.80
+```
+
+实测：热键 → 工具栏出现 → 画一笔 → 点 OK → `UI: committed ... as a new layer`。
+
+体积：加完这段 DLL 涨到 95,744 字节，超过 94,720 的固定上限（`PenBridge` 按字节数
+校验），所以编译加了 `-fno-asynchronous-unwind-tables -fno-unwind-tables`，
+压回 93,184 字节。
