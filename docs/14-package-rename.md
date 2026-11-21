@@ -137,3 +137,19 @@ GitHub Release `v0.3.28` 的 APK 已经是新包名 **`lator.forsai`**，
      而不是原来的 254。
 
 4. 当前容器 `screenSize` 从 `2560x1660` 修正为 `2560x1600`。
+
+## 0.3.30：新容器默认分辨率的真正入口
+
+0.3.29 只改了 `Container.<init>()`，但新建容器界面在
+`ContainerDetailFragment.onCreateView()` 里写死了：
+
+```smali
+:cond_3
+const-string v0, "1280x720"
+```
+
+所以 UI 仍然把新容器填成 1280x720。0.3.30 改成在 `onCreateView` 里用
+`AppUtils.getScreenWidth()/getScreenHeight()` 的长边 x 短边，和
+`Container` 构造函数保持一致。
+
+当前容器 `screenSize` 已设为 `2560x1600`，启动后保持不被覆盖。
