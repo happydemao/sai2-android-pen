@@ -2447,6 +2447,95 @@ static void find_surfaces(void) {
     free(chunk); free(sig); fclose(f);
 }
 
+/* Find decoded image blocks: 64 KB-aligned buffers that look like a 256x256
+ * 32bpp slice of the canvas, i.e. mostly paper white *and* carrying ink.
+ * The surface scan misses these because a decoded layer tile is not wrapped in
+ * a surface object - the compositor reads raw tile pixels. */
+static void find_images(void) {
+    FILE *f = fopen("C:\\wt_images.log", "wb");
+    if (!f) return;
+    HANDLE self = GetCurrentProcess();
+    unsigned char *buf = (unsigned char*)malloc(0x10000);
+    if (!buf) { fclose(f); return; }
+    unsigned long long addr = 0x10000;
+    int hits = 0;
+    while (addr < 0x7FFFFFFF0000ull) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPCVOID)(uintptr_t)addr, &mbi, sizeof mbi)) break;
+        unsigned long long base = (unsigned long long)(uintptr_t)mbi.BaseAddress;
+        unsigned long long size = (unsigned long long)mbi.RegionSize;
+        if (size == 0) break;
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) &&
+            !(mbi.Protect & PAGE_GUARD)) {
+            for (unsigned long long off = 0; off + 0x10000 <= size; off += 0x10000) {
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)(base + off), buf, 0x10000, &got) ||
+                    got < 0x10000)
+                    continue;
+                int paper = 0, ink = 0, other = 0;
+                for (int k = 0; k + 4 <= 0x10000; k += 4) {
+                    int b = buf[k], g = buf[k+1], r = buf[k+2];
+                    if (b >= 0xE0 && g >= 0xE0 && r >= 0xE0) ++paper;
+                    else if (b <= 0x20 && g <= 0x20 && r <= 0x20) ++ink;
+                    else ++other;
+                }
+                if (paper >= 2000 && ink >= 100) {
+                    ++hits;
+                    fprintf(f, "IMAGE addr=%llx paper=%d ink=%d other=%d first=%02x%02x%02x%02x\n",
+                            base + off, paper, ink, other,
+                            buf[0], buf[1], buf[2], buf[3]);
+                }
+            }
+        }
+        addr = base + size;
+    }
+    fprintf(f, "done hits=%d\n", hits);
+    free(buf);
+    fclose(f);
+}
+
+/* Can the plugin deliver pixels to SAI through the OS clipboard? If Ctrl+V
+ * turns this CF_DIB into a new layer, then a liquify result can be committed
+ * through a supported SAI path without reverse engineering its tile format. */
+static void clipboard_test(void) {
+    int w = 256, h = 256;
+    size_t stride = (size_t)w * 4;
+    size_t imgsz = stride * (size_t)h;
+    size_t total = sizeof(BITMAPINFOHEADER) + imgsz;
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, total);
+    if (!mem) { ms_log("CLIP: GlobalAlloc failed"); return; }
+    unsigned char *p = (unsigned char*)GlobalLock(mem);
+    if (!p) { GlobalFree(mem); ms_log("CLIP: GlobalLock failed"); return; }
+    BITMAPINFOHEADER *ih = (BITMAPINFOHEADER*)p;
+    memset(ih, 0, sizeof *ih);
+    ih->biSize = sizeof *ih;
+    ih->biWidth = w;
+    ih->biHeight = h;          /* bottom-up, which is what CF_DIB expects */
+    ih->biPlanes = 1;
+    ih->biBitCount = 32;
+    ih->biCompression = BI_RGB;
+    ih->biSizeImage = (DWORD)imgsz;
+    unsigned char *bits = p + sizeof *ih;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            unsigned char *q = bits + (size_t)y * stride + (size_t)x * 4;
+            int inside = (x > 40 && x < 216 && y > 40 && y < 216);
+            if (inside) { q[0] = 0x00; q[1] = 0xFF; q[2] = 0x00; q[3] = 0xFF; }
+            else { q[0] = 0xFF; q[1] = 0x00; q[2] = 0xFF; q[3] = 0xFF; }
+        }
+    GlobalUnlock(mem);
+    if (!OpenClipboard(NULL)) { GlobalFree(mem); ms_log("CLIP: OpenClipboard failed"); return; }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_DIB, mem)) {
+        GlobalFree(mem);
+        ms_log("CLIP: SetClipboardData failed");
+    } else {
+        ms_log("CLIP: 256x256 green-on-magenta CF_DIB placed on clipboard");
+    }
+    CloseClipboard();
+}
+
 static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
@@ -2542,6 +2631,16 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
                 }
                 free(bf);
             }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_clip") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_clip");
+            clipboard_test();
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_images") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_images");
+            find_images();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_surfaces") != INVALID_FILE_ATTRIBUTES) {
