@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="binding_type_entries">
+        <item>键盘</item>
+        <item>鼠标</item>
+        <item>手柄</item>
+    </string-array>
+    <string-array name="dinput_mapper_type_entries">
+        <item>标准</item>
+        <item>XInput</item>
+    </string-array>
+    <string-array name="resource_memory_type_entries">
+        <item>@string/auto</item>
+        <item>Opaque FD</item>
+        <item>DMA Buffer</item>
+        <item>Native Hardware Buffer</item>
+    </string-array>
+    <string-array name="midi_channel_entries">
+        <item>通道 1</item>
+        <item>鼓（通道 10）</item>
+    </string-array>
+    <string-array name="language_entries">
+        <item>English</item>
+        <item>Português</item>
+        <item>Русский</item>
+        <item>简体中文</item>
+    </string-array>
+</resources>

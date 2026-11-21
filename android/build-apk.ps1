@@ -130,6 +130,27 @@ $call = @'
     invoke-static {p0, p1}, Lcom/winlator/sai/PenBridge;->handle(Landroid/view/View;Landroid/view/MotionEvent;)V
 '@
 
+# Touch gestures: PenBridge.handleTouch() returns true when the event belongs to a
+# multi-finger gesture (two/three-finger tap, pan, pinch, rotate, quick fit).
+# Returning early keeps the native two-finger scroll / right-click paths out of the way.
+# Only v0 is used before the original body, and .registers is untouched.
+$callTouch = @'
+    # SAI pen: pressure sampling + stylus left-click synthesis (handle()).
+    # SAI touch gestures: multi-finger events are consumed here so the native
+    # two-finger scroll / right-click logic never sees them.
+    invoke-static {p0, p1}, Lcom/winlator/sai/PenBridge;->handleTouch(Landroid/view/View;Landroid/view/MotionEvent;)Z
+
+    move-result v0
+
+    if-eqz v0, :penbridge_not_gesture
+
+    const/4 v0, 0x1
+
+    return v0
+
+    :penbridge_not_gesture
+'@
+
 # A. updateXform: tell the bridge the container resolution; force absolute cursor tracking.
 $t = Patch-Once $t @'
     .param p4, "innerHeight"    # I
@@ -148,7 +169,8 @@ $t = Patch-Once $t @'
     .line 77
 '@ 'A updateXform'
 
-# B. onTouchEvent entry (before the SOURCE_MOUSE early-return).
+# B. onTouchEvent entry (before the SOURCE_MOUSE early-return). Multi-finger gestures
+#    consume the event here; single-finger/pen events fall through to the native body.
 $t = Patch-Once $t @'
 .method public onTouchEvent(Landroid/view/MotionEvent;)Z
     .registers 13
@@ -158,7 +180,7 @@ $t = Patch-Once $t @'
     .registers 13
     .param p1, "event"    # Landroid/view/MotionEvent;
 
-'@ + $call) 'B onTouchEvent'
+'@ + $callTouch) 'B onTouchEvent'
 
 # D. onExternalMouseEvent entry (external pen hover goes here).
 $t = Patch-Once $t @'
@@ -246,6 +268,70 @@ $t = Patch-Once $t @'
 '@ 'external controller keyboard guard'
 
 [System.IO.File]::WriteAllText($ec, $t, (New-Object System.Text.UTF8Encoding($false)))
+
+# ------------------------------------------------ 3c. Chinese UI (zh_CN language)
+# Winlator 11.2 ships only en/pt/ru. Add zh_CN as a fourth supported locale so
+# LocaleHelper can select it and setEnvVars gets a matching language index.
+# The translated strings live in android/res/values-zh-rCN and values-zh.
+# NOTE: this script replaces dex only; resources.arsc is not rebuilt here.
+# For the Chinese UI, rebuild resources with apktool (docs/16-winlator-chinese.md),
+# or use the prebuilt Winlator-11.2-SAIPen-0.3.8-zh.apk.
+Step 'Patch LocaleHelper.smali (zh_CN)'
+$lh = Join-Path $smaliDir 'com\winlator\core\LocaleHelper.smali'
+$t = NormalizeLF (Get-Content $lh -Raw -Encoding UTF8)
+$t = Patch-Once $t @'
+.method static constructor <clinit>()V
+    .registers 3
+
+    .line 13
+    const-string v0, "pt_BR"
+
+    const-string v1, "ru_RU"
+
+    const-string v2, "en_US"
+
+    filled-new-array {v2, v0, v1}, [Ljava/lang/String;
+'@ @'
+.method static constructor <clinit>()V
+    .registers 4
+
+    .line 13
+    const-string v0, "pt_BR"
+
+    const-string v1, "ru_RU"
+
+    const-string v2, "en_US"
+
+    const-string v3, "zh_CN"
+
+    filled-new-array {v2, v0, v1, v3}, [Ljava/lang/String;
+'@ 'LocaleHelper zh_CN'
+
+# Keep Wine/SAI on en_US.UTF-8 even when the UI language is Chinese.
+# zh_CN.UTF-8 makes SAI mis-decode non-ASCII file names
+# (e.g. 色板1.saiswat -> h?2f??1.saiswat) and fail to load its swatches.
+$t = Patch-Once $t @'
+    if-ge v4, v2, :cond_37
+
+    aget-object v6, v1, v4
+
+    .line 43
+'@ @'
+    if-ge v4, v2, :cond_37
+
+    aget-object v6, v1, v4
+
+    const-string v7, "zh"
+
+    invoke-virtual {v6, v7}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+
+    move-result v7
+
+    if-eqz v7, :cond_33
+
+    .line 43
+'@ 'LocaleHelper env locale'
+[System.IO.File]::WriteAllText($lh, $t, (New-Object System.Text.UTF8Encoding($false)))
 
 # --------------------------------------------------------------- 4. assemble
 Step 'smali assemble'

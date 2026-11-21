@@ -91,7 +91,20 @@ public final class PenBridge {
     private static Method mInjectKeyRelease;
     private static Object KEY_PRIOR;
     private static Object KEY_NEXT;
+    /* 触控屏手势要注入的按键（XKeycode 常量，全部反射取）。 */
+    private static Object KEY_CTRL_L;
+    private static Object KEY_SHIFT_L;
+    private static Object KEY_SPACE;
+    private static Object KEY_Z;
+    private static Object KEY_Y;
+    private static Object KEY_0;
     private static boolean wheelLogged;
+
+    /* TouchpadView 原生多指状态：由 PenBridge 在识别出手势时清空，
+     * 防止原生两指滚动/右键逻辑和我们的手势同时生效。 */
+    private static Field fNativeFingers;
+    private static Field fNativeNumFingers;
+    private static Field fNativeScrolling;
 
     /** 我们合成出来的左键是否处于按下状态。 */
     private static boolean penDown;
@@ -99,6 +112,14 @@ public final class PenBridge {
     private static java.lang.reflect.Field fPointer;
     private static java.lang.reflect.Method mIsPressed;
     private static boolean fingerActive;
+    /* 手指落笔延迟到移动超过阈值才开始：否则两指手势的第一根手指会先画一个点，
+     * 两指轻点撤销时 Ctrl+Z 撤销的是这个点，而不是用户想撤销的那一笔。 */
+    private static boolean fingerDrawing;
+    private static boolean fingerSuppressed;
+    private static float fingerStartViewX, fingerStartViewY;
+    private static int fingerLastX, fingerLastY;
+    private static float fingerLastPressure;
+    private static final float FINGER_DRAW_PX = 8f;
     /* 落笔/抬笔样本单独排队：绝不合并，保证 SAI 一定收到 UP 和下一笔的 DOWN。
      * 抬笔时还会追加两个位置不同的零压样本，见 emit()。 */
     private static final java.util.ArrayDeque<int[]> CRIT = new java.util.ArrayDeque<>();
@@ -227,13 +248,37 @@ B64_8
     }
 
     /**
-     * 统一入口。smali：
-     *   invoke-static {p0, p1}, Lcom/winlator/sai/PenBridge;->handle(Landroid/view/View;Landroid/view/MotionEvent;)V
-     * 任何异常都吞掉：桥坏了只应退化，绝不能让 Winlator 崩。
+     * 外接鼠标/笔入口（onExternalMouseEvent）。单指手势不在这里发生。
      */
     public static void handle(View pad, MotionEvent ev) {
         if (pad == null || ev == null) return;
         ensureBridgeFiles();
+        final boolean pen = isPen(ev);
+        if (pen) TouchGestures.cancel(pad);
+        handleEvent(pad, ev, pen, false);
+    }
+
+    /**
+     * 触屏入口（onTouchEvent）。返回 true 表示该事件已被手势消费：
+     * smali 侧会直接 return true，原生 TouchpadView 的两指滚动/右键逻辑不再执行。
+     *
+     * 单指事件返回 false，保持原有单指作画/点击行为不变。
+     */
+    public static boolean handleTouch(View pad, MotionEvent ev) {
+        if (pad == null || ev == null) return false;
+        ensureBridgeFiles();
+        final boolean pen = isPen(ev);
+        if (pen) {
+            TouchGestures.cancel(pad);
+            handleEvent(pad, ev, true, false);
+            return false;
+        }
+        final boolean consumed = TouchGestures.onTouch(pad, ev);
+        handleEvent(pad, ev, false, consumed);
+        return consumed;
+    }
+
+    private static void handleEvent(View pad, MotionEvent ev, boolean pen, boolean consumed) {
         try {
             final int action = ev.getActionMasked();
             final float pressure = ev.getPressure();
@@ -262,53 +307,130 @@ B64_8
                         + " -> " + x + "," + y);
             }
 
-            // 1) 压感采样（手指与笔都送）
-            //    笔自己会在抬笔后继续送悬停事件，不需要我们补；只有手指没有悬停流。
-            final boolean pen = isPen(ev);
+            if (!pen) {
+                handleFingerTouch(pad, ev, consumed, x, y);
+                return;
+            }
 
+            // ---------------- 以下全部是笔的原有逻辑 ----------------
+            // 1) 压感采样（笔自己会在抬笔后继续送悬停事件，不需要我们补）
             // 笔的每个事件都把系统鼠标光标移到笔尖，包括 HOVER_MOVE。
             // 原生 TouchpadView 只在拖动/按下时移动光标；SAI 的画笔圈却从一开始
             // 就跟着悬停的笔，结果就是"圈在笔尖、系统光标还停在旧位置"。
-            if (pen) moveCursorTo(pad, x, y);
+            moveCursorTo(pad, x, y);
 
-            emit(x, y, pressure, action, !pen);
+            emit(x, y, pressure, action, false);
 
             // 2) 只有"鼠标型笔"才合成左键（正规 STYLUS 交给 Winlator 原生处理）
-            if (pen) {
-                if (!loggedPen) {
-                    loggedPen = true;
-                    note("pen src=0x" + Integer.toHexString(ev.getSource())
-                            + " tool=" + ev.getToolType(0)
-                            + " synth=" + needsSyntheticClick(ev));
-                }
-                if (needsSyntheticClick(ev)) {
-                    syncLeftButton(pad, x, y, pressure, action);
-                } else {
-                    // 正规 STYLUS（S Pen）：原生 tap 已经会点，我们只在拖动/长按时补按下
-                    syncDragOnly(pad, x, y, pressure, ev, action);
-                }
+            if (!loggedPen) {
+                loggedPen = true;
+                note("pen src=0x" + Integer.toHexString(ev.getSource())
+                        + " tool=" + ev.getToolType(0)
+                        + " synth=" + needsSyntheticClick(ev));
+            }
+            if (needsSyntheticClick(ev)) {
+                syncLeftButton(pad, x, y, pressure, action);
             } else {
-                // 手指：Winlator 原生 onTouchEvent 只移动光标，从不按左键（它仅在抬手且
-                // 判定为 tap 时补一次 press+release）。手指笔画完全靠上面的 WinTab 流绘制，
-                // 收笔靠抬笔后补的悬停样本（见 emit()）。这里只在 UP 同步补一次 release，
-                // 防止系统里残留的按下状态把下一笔接上来。
-                if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
-                    fingerActive = true;
-                    lastPenEventMs = SystemClock.uptimeMillis();
-                    armReleaseWatchdog(pad);
-                } else if (action == MotionEvent.ACTION_MOVE) {
-                    lastPenEventMs = SystemClock.uptimeMillis();
-                } else if (action == MotionEvent.ACTION_UP
-                        || action == MotionEvent.ACTION_CANCEL
-                        || action == MotionEvent.ACTION_POINTER_UP) {
-                    if (fingerActive) {
-                        fingerActive = false;
-                        forceRelease(pad, "finger-up act=" + action);
-                    }
-                }
+                // 正规 STYLUS（S Pen）：原生 tap 已经会点，我们只在拖动/长按时补按下
+                syncDragOnly(pad, x, y, pressure, ev, action);
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * 手指路径。
+     *
+     * 和旧版的区别只有一点：单指 DOWN 不再立刻发压感样本，而是等到移动超过
+     * FINGER_DRAW_PX 才发第一包。这样两指/三指手势的第一根手指不会先落一个点，
+     * 也避免了"两指轻点撤销"只撤销了这个点。单指拖动画线仍然从越过阈值的位置开始。
+     *
+     * consumed=true 或 pointerCount>=2 时，把已经开始的单指笔画收笔并停止采样，
+     * 后续交给 {@link TouchGestures} 注入快捷键/鼠标操作。
+     */
+    private static void handleFingerTouch(View pad, MotionEvent ev, boolean consumed, int x, int y) {
+        final int action = ev.getActionMasked();
+        final int count = ev.getPointerCount();
+        final float pressure = ev.getPressure();
+        final long now = SystemClock.uptimeMillis();
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            // 新的一次触摸：允许单指作画，并清掉上一次手势的抑制状态。
+            fingerSuppressed = false;
+            fingerDrawing = false;
+            fingerActive = false;
+            fingerStartViewX = ev.getX();
+            fingerStartViewY = ev.getY();
+            fingerLastX = x;
+            fingerLastY = y;
+            fingerLastPressure = pressure;
+            lastPenEventMs = now;
+            return;
+        }
+
+        if (fingerSuppressed) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                fingerSuppressed = false;
+            }
+            fingerActive = false;
+            return;
+        }
+
+        if (consumed || count >= 2) {
+            if (fingerDrawing) endFingerStroke(pad, "gesture");
+            fingerDrawing = false;
+            fingerActive = false;
+            fingerSuppressed = true;
+            lastPenEventMs = now;
+            return;
+        }
+
+        switch (action) {
+            case MotionEvent.ACTION_MOVE:
+                if (!fingerDrawing) {
+                    final float dx = ev.getX() - fingerStartViewX;
+                    final float dy = ev.getY() - fingerStartViewY;
+                    if ((dx * dx + dy * dy) < FINGER_DRAW_PX * FINGER_DRAW_PX) {
+                        fingerLastX = x;
+                        fingerLastY = y;
+                        fingerLastPressure = pressure;
+                        return;
+                    }
+                    fingerDrawing = true;
+                    fingerActive = true;
+                    lastPenEventMs = now;
+                    armReleaseWatchdog(pad);
+                    flog("FINGER_DRAW start " + x + "," + y);
+                    emit(x, y, pressure, MotionEvent.ACTION_DOWN, true);
+                } else {
+                    lastPenEventMs = now;
+                    emit(x, y, pressure, MotionEvent.ACTION_MOVE, true);
+                }
+                fingerLastX = x;
+                fingerLastY = y;
+                fingerLastPressure = pressure;
+                break;
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (fingerDrawing) endFingerStroke(pad, "finger-up act=" + action);
+                fingerActive = false;
+                fingerSuppressed = false;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    /** 结束当前手指笔画（幂等）。 */
+    private static void endFingerStroke(View pad, String why) {
+        if (!fingerDrawing) return;
+        fingerDrawing = false;
+        fingerActive = false;
+        emit(fingerLastX, fingerLastY, fingerLastPressure, MotionEvent.ACTION_UP, true);
+        forceRelease(pad, why);
+        flog("FINGER_DRAW end " + why);
     }
 
     /** 诊断日志写文件（这台设备 logd 被关，logcat 读不到任何东西）。 */
@@ -633,6 +755,18 @@ B64_8
                 fXform = viewCls.getDeclaredField("xform");
                 fXform.setAccessible(true);
             } catch (Throwable ignored) { }
+            try {
+                fNativeFingers = viewCls.getDeclaredField("fingers");
+                fNativeFingers.setAccessible(true);
+            } catch (Throwable ignored) { }
+            try {
+                fNativeNumFingers = viewCls.getDeclaredField("numFingers");
+                fNativeNumFingers.setAccessible(true);
+            } catch (Throwable ignored) { }
+            try {
+                fNativeScrolling = viewCls.getDeclaredField("scrolling");
+                fNativeScrolling.setAccessible(true);
+            } catch (Throwable ignored) { }
 
             Class<?> xformCls = Class.forName("com.winlator.math.XForm");
             mTransformPoint = xformCls.getMethod("transformPoint",
@@ -652,11 +786,594 @@ B64_8
             mInjectKeyPress = xsCls.getMethod("injectKeyPress", keyCls);
             mInjectKeyRelease = xsCls.getMethod("injectKeyRelease", keyCls);
 
+            KEY_CTRL_L = keyCls.getField("KEY_CTRL_L").get(null);
+            KEY_SHIFT_L = keyCls.getField("KEY_SHIFT_L").get(null);
+            KEY_SPACE = keyCls.getField("KEY_SPACE").get(null);
+            KEY_Z = keyCls.getField("KEY_Z").get(null);
+            KEY_Y = keyCls.getField("KEY_Y").get(null);
+            KEY_0 = keyCls.getField("KEY_0").get(null);
+
             Log.d(TAG, "reflect ok xServer=" + (fXServer != null)
                     + " xform=" + (fXform != null)
                     + " move=" + (mInjectPointerMove != null));
         } catch (Throwable t) {
             try { Log.w(TAG, "reflect failed: " + t); } catch (Throwable ignored) { }
+        }
+    }
+
+    // ------------------------------------------------------ 触控屏手势（0.3.7）
+
+    private static Object xserver(View pad) {
+        resolveReflection();
+        if (fXServer == null) return null;
+        try {
+            return fXServer.get(pad);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 反射把 XKeycode 常量按下/抬起。返回是否成功。 */
+    private static boolean keyDown(Object xs, Object key) {
+        if (xs == null || key == null || mInjectKeyPress == null) return false;
+        try {
+            mInjectKeyPress.invoke(xs, key);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void keyUp(Object xs, Object key) {
+        if (xs == null || key == null || mInjectKeyRelease == null) return;
+        try {
+            mInjectKeyRelease.invoke(xs, key);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 按顺序按下 keys，再逆序抬起。用于 Ctrl+Z / Ctrl+Y / Ctrl+0 / Ctrl+'+' / Ctrl+'-'。
+     * keys 里可以同时有修饰键（Ctrl/Alt/Shift）和主键。
+     */
+    private static void keyTap(View pad, Object... keys) {
+        Object xs = xserver(pad);
+        if (xs == null || keys == null || keys.length == 0) return;
+        for (Object k : keys) keyDown(xs, k);
+        for (int i = keys.length - 1; i >= 0; i--) keyUp(xs, keys[i]);
+    }
+
+    /* SAI 默认快捷键：Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+0 全屏/适合窗口、
+     * Ctrl+'+' 放大、Ctrl+'-' 缩小。'+' 在主键盘上是 Shift+'='，所以要带 Shift。 */
+    private static void shortcutUndo(View pad) {
+        keyTap(pad, KEY_CTRL_L, KEY_Z);
+        flog("GEST undo ctrl+z");
+        note("gesture -> Ctrl+Z (undo)");
+        showToast(pad, "撤销 (Ctrl+Z)");
+    }
+
+    private static void shortcutRedo(View pad) {
+        keyTap(pad, KEY_CTRL_L, KEY_Y);
+        flog("GEST redo ctrl+y");
+        note("gesture -> Ctrl+Y (redo)");
+        showToast(pad, "重做 (Ctrl+Y)");
+    }
+
+    private static void shortcutFit(View pad) {
+        keyTap(pad, KEY_CTRL_L, KEY_0);
+        flog("GEST fit ctrl+0");
+        note("gesture -> Ctrl+0 (fit)");
+        showToast(pad, "适合窗口 / 居中全屏 (Ctrl+0)");
+    }
+
+    /**
+     * 手势动作提示。只在撤销 / 重做 / 适合窗口三个一次性动作上弹，
+     * 平移、缩放、旋转是连续操作，不弹。Toast 必须回主线程。
+     */
+    private static void showToast(final View pad, final String msg) {
+        if (pad == null) return;
+        try {
+            pad.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        android.content.Context ctx = pad.getContext();
+                        if (ctx == null) return;
+                        android.widget.Toast.makeText(ctx.getApplicationContext(), msg,
+                                android.widget.Toast.LENGTH_SHORT).show();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 两指缩放 -> PageUp / PageDown。
+     *
+     * 实测（SM-X810 + [PivInk]SAI 2026-10-19）：
+     *   - PageUp / PageDown 是 SAI 默认的「以光标位置为中心放大/缩小」，稳定可用；
+     *   - Ctrl+'-' 可以缩小，但 Ctrl+'+' / Ctrl+Shift+'=' 在这个构建里不放大；
+     *   - Ctrl+KP_ADD 也不放大。
+     * 所以统一用 PageUp/PageDown，和滚轮缩放（docs/12）走同一条已验证路径。
+     */
+    private static void shortcutZoom(View pad, boolean in) {
+        keyTap(pad, in ? KEY_PRIOR : KEY_NEXT);
+        flog("GEST zoom " + (in ? "in" : "out") + " (PageUp/PageDown)");
+    }
+
+    /**
+     * 两指旋转 -> Shift+PageUp / Shift+PageDown。
+     *
+     * SAI 的旋转视图快捷键：Shift+PageUp = 逆时针、Shift+PageDown = 顺时针，
+     * 每次约 11.3°（默认值）。比 Alt+Space+左键拖动可靠：在 Wine 里 Alt+Space
+     * 很容易被系统菜单抢走，实测画布不转。
+     */
+    private static void rotateStep(View pad, boolean clockwise) {
+        keyTap(pad, KEY_SHIFT_L, clockwise ? KEY_NEXT : KEY_PRIOR);
+        flog("GEST rotate " + (clockwise ? "cw" : "ccw"));
+    }
+
+    private static Object buttonLeft() {
+        resolveReflection();
+        return BUTTON_LEFT;
+    }
+
+    private static void pointerDown(View pad) {
+        Object xs = xserver(pad);
+        Object left = buttonLeft();
+        if (xs == null || left == null || mInjectPress == null) return;
+        try {
+            mInjectPress.invoke(xs, left);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void pointerUp(View pad) {
+        Object xs = xserver(pad);
+        Object left = buttonLeft();
+        if (xs == null || left == null || mInjectRelease == null) return;
+        try {
+            mInjectRelease.invoke(xs, left);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 把视图坐标（fingertip 在 View 里的坐标）映射成容器坐标。 */
+    private static int[] toContainerPoint(View pad, float vx, float vy) {
+        resolveReflection();
+        if (fXform == null || mTransformPoint == null) return null;
+        try {
+            float[] xform = (float[]) fXform.get(pad);
+            if (xform == null) return null;
+            float[] p = (float[]) mTransformPoint.invoke(null, xform, vx, vy);
+            if (p == null || p.length < 2) return null;
+            return new int[]{(int) p[0], (int) p[1]};
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 清空 TouchpadView 原生的多指状态。
+     *
+     * 手势事件被 smali 提前 return 后，原生不会收到第二个手指的 POINTER_DOWN；
+     * 但第一个手指已经在原生 fingers[] 里留下了记录。不清理的话，残留的单指状态
+     * 会在手势结束后继续移动光标，甚至在抬手时补一次点击。这里用反射直接清空
+     * fingers[] / numFingers / scrolling，等价于"原生从未见过这次触摸"。
+     */
+    private static void clearNativeFingers(View pad) {
+        resolveReflection();
+        try {
+            if (fNativeFingers != null) {
+                Object arr = fNativeFingers.get(pad);
+                if (arr != null) {
+                    for (int i = 0; i < 4; i++) java.lang.reflect.Array.set(arr, i, null);
+                }
+            }
+            if (fNativeNumFingers != null) fNativeNumFingers.setByte(pad, (byte) 0);
+            if (fNativeScrolling != null) fNativeScrolling.setBoolean(pad, false);
+            flog("GEST native fingers cleared");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 多指手势识别 + 快捷键/鼠标注入。
+     *
+     * 映射（全部基于两指/三指，单指不受影响）：
+     *   两指轻点            -> Ctrl+Z（撤销）
+     *   三指轻点            -> Ctrl+Y（重做）
+     *   两指平移            -> Space + 左键拖动（平移画布）
+     *   两指捏合/张开       -> PageUp / PageDown（以光标为中心缩放画布）
+     *   两指旋转            -> Shift+PageUp / Shift+PageDown（每次约 11.3°）
+     *   快速向内捏合        -> Ctrl+0（适合窗口/居中全屏）
+     *
+     * 事件被消费时返回 true，smali 侧直接 return，原生两指滚动/右键逻辑不再执行。
+     */
+    private static final class TouchGestures {
+        private static final int IDLE = 0;
+        private static final int CAND2 = 1;
+        private static final int CAND3 = 2;
+        private static final int PAN = 3;
+        private static final int ROTATE = 4;
+        private static final int ZOOM = 5;
+        private static final int FIT = 6;
+        private static final int IGNORE = 7;
+
+        private static final float TAP_SLOP = 16f;
+        private static final long TAP_MS = 380;
+        private static final float FIT_RATIO = 0.62f;
+        private static final long FIT_MS = 280;
+        private static final float FIT_SLOP = 60f;
+        /** 捏合收缩速度下限（比例/毫秒），防止普通快速缩小误触发"适合窗口"。 */
+        private static final float FIT_SPEED = 0.0011f;
+        private static final float ZOOM_STEP_PX = 55f;
+        /** SAI 的 Shift+PageUp/PageDown 每次旋转约 11.3°，换算成弧度。 */
+        private static final float ROTATE_STEP_RAD = 0.197f;
+
+        private static int mode = IDLE;
+        private static boolean active;
+        private static long startMs;
+        private static float cx0, cy0, dist0, angle0;
+        private static float lastDist;
+        /* 旋转：记上一次已经"消费"掉的角度，累计到 11.3° 就按一次旋转键。 */
+        private static float rotLastAngle;
+        private static float rotAccum;
+        private static final float[] startX = new float[4];
+        private static final float[] startY = new float[4];
+        private static final boolean[] tracked = new boolean[4];
+        private static float zoomAccum;
+        private static int zoomSteps;
+        private static long lastFitMs;
+        private static boolean spaceHeld;
+        private static boolean leftHeld;
+        private static boolean logged;
+
+        static boolean onTouch(View pad, MotionEvent ev) {
+            final int action = ev.getActionMasked();
+            final int count = ev.getPointerCount();
+            final long now = SystemClock.uptimeMillis();
+
+            if (action == MotionEvent.ACTION_DOWN) {
+                // 正常情况下手势在 UP 时已经结束；这里兜底一次，防止漏掉 UP 后
+                // Space/Alt/左键一直按住。
+                if (active) finish(pad);
+                else reset();
+                trackDown(ev, 0);
+                return false;
+            }
+            if (action == MotionEvent.ACTION_CANCEL) {
+                if (active) {
+                    finish(pad);
+                    return true;
+                }
+                reset();
+                return false;
+            }
+
+            if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                if (count < 2) return false;
+                if (!active) {
+                    start(pad, ev, count);
+                    trackDown(ev, ev.getActionIndex());
+                } else if (mode == CAND2 && count == 3) {
+                    // 两指手势过程中又落下第三指：升级成三指轻点候选。
+                    // 三指轻点通常就是 2 -> 3 落指，然后依次抬起。
+                    mode = CAND3;
+                    trackDown(ev, ev.getActionIndex());
+                    computeStart(ev);
+                } else {
+                    // 已经在平移/缩放/旋转，或超过三指：结束当前操作并忽略后续。
+                    if (mode == PAN || mode == ROTATE) endPointerGesture(pad);
+                    mode = IGNORE;
+                    trackDown(ev, ev.getActionIndex());
+                }
+                if (!logged) {
+                    logged = true;
+                    note("touch gestures enabled");
+                }
+                flog("GEST down n=" + count + " mode=" + mode);
+                return true;
+            }
+
+            if (action == MotionEvent.ACTION_MOVE) {
+                if (count < 2) return false;
+                if (!active) start(pad, ev, count);
+                update(pad, ev, now);
+                return true;
+            }
+
+            if (action == MotionEvent.ACTION_POINTER_UP) {
+                if (!active) return false;
+                update(pad, ev, now);
+                if (mode == CAND2 && count == 2) maybeTap(pad, ev, 2, now);
+                else if (mode == CAND3 && count == 3) maybeTap(pad, ev, 3, now);
+                finish(pad);
+                return true;
+            }
+
+            if (action == MotionEvent.ACTION_UP) {
+                if (!active) return false;
+                finish(pad);
+                return true;
+            }
+            return false;
+        }
+
+        private static void start(View pad, MotionEvent ev, int count) {
+            active = true;
+            startMs = SystemClock.uptimeMillis();
+            mode = count == 2 ? CAND2 : (count == 3 ? CAND3 : IGNORE);
+            java.util.Arrays.fill(tracked, false);
+            for (int i = 0; i < ev.getPointerCount(); i++) {
+                int id = ev.getPointerId(i);
+                if (id >= 0 && id < 4) {
+                    startX[id] = ev.getX(i);
+                    startY[id] = ev.getY(i);
+                    tracked[id] = true;
+                }
+            }
+            computeStart(ev);
+            // 原生可能已经按着左键/滚轮（单指拖动中途加入第二指），先松开。
+            forceRelease(pad, "gesture start");
+            clearNativeFingers(pad);
+            flog("GEST start n=" + count);
+        }
+
+        private static void trackDown(MotionEvent ev, int index) {
+            if (index < 0 || index >= ev.getPointerCount()) return;
+            int id = ev.getPointerId(index);
+            if (id >= 0 && id < 4) {
+                startX[id] = ev.getX(index);
+                startY[id] = ev.getY(index);
+                tracked[id] = true;
+            }
+        }
+
+        private static void computeStart(MotionEvent ev) {
+            float[] g = geometry(ev);
+            cx0 = g[0];
+            cy0 = g[1];
+            dist0 = g[2];
+            angle0 = g[3];
+            lastDist = dist0;
+            zoomAccum = 0f;
+        }
+
+        /** 返回 {重心x, 重心y, 两指距离, 两指夹角}，坐标为 View 坐标。 */
+        private static float[] geometry(MotionEvent ev) {
+            final int n = Math.min(2, ev.getPointerCount());
+            float cx = 0, cy = 0;
+            for (int i = 0; i < n; i++) {
+                cx += ev.getX(i);
+                cy += ev.getY(i);
+            }
+            if (n > 0) {
+                cx /= n;
+                cy /= n;
+            }
+            float dist = 0f, angle = 0f;
+            if (ev.getPointerCount() >= 2) {
+                float dx = ev.getX(1) - ev.getX(0);
+                float dy = ev.getY(1) - ev.getY(0);
+                dist = (float) Math.hypot(dx, dy);
+                angle = (float) Math.atan2(dy, dx);
+            }
+            return new float[]{cx, cy, dist, angle};
+        }
+
+        private static void update(View pad, MotionEvent ev, long now) {
+            final int count = ev.getPointerCount();
+            if (count > 3) {
+                if (mode == PAN || mode == ROTATE) endPointerGesture(pad);
+                mode = IGNORE;
+                return;
+            }
+            if (count < 2) return;
+
+            float[] g = geometry(ev);
+            final float cx = g[0], cy = g[1], dist = g[2], angle = g[3];
+            final float centroidMove = (float) Math.hypot(cx - cx0, cy - cy0);
+            final long dt = now - startMs;
+            final float ratio = dist / Math.max(dist0, 20f);
+
+            // 快速向内捏合：适合窗口/居中全屏。
+            // 误触太多，所以条件收紧：两指要缩到 62% 以下、在 280ms 内、
+            // 重心基本不动、收缩速度够快；而且已经发过两次以上缩放键后
+            // 不再判定（那时用户显然是在正常缩小）。
+            final float shrinkSpeed = (1f - ratio) / Math.max(dt, 1L);
+            if ((mode == CAND2 || mode == ZOOM)
+                    && (mode != ZOOM || zoomSteps <= 1)
+                    && dist0 >= 80f
+                    && dt <= FIT_MS && ratio <= FIT_RATIO
+                    && centroidMove <= FIT_SLOP && shrinkSpeed >= FIT_SPEED
+                    && now - lastFitMs >= 600) {
+                lastFitMs = now;
+                shortcutFit(pad);
+                mode = FIT;
+                flog("GEST fit ratio=" + ratio + " dt=" + dt + " speed=" + shrinkSpeed);
+                return;
+            }
+
+            if (mode == CAND2) {
+                // 平移阈值从 18px 提高到 40px，并且要求平移分数明显大于
+                // 旋转/缩放分数（1.2 倍以上）才判为平移。两指旋转时重心
+                // 多多少少会动，这个改动避免「想旋转却被判成平移」。
+                final float panScore = centroidMove / 40f;
+                final float zoomScore = Math.abs(ratio - 1f) / 0.08f;
+                final float rotScore = Math.abs(normalizeAngle(angle - angle0)) / 0.14f; // ~8°
+
+                final boolean canPan = panScore >= 1.2f;   // 至少 48px 重心位移
+                final boolean canZoom = zoomScore >= 1f;
+                final boolean canRot = rotScore >= 1f;
+
+                if (canRot && rotScore >= panScore * 0.8f && rotScore >= zoomScore * 0.8f) {
+                    beginRotate(pad, angle);
+                } else if (canZoom && zoomScore >= panScore * 0.8f) {
+                    mode = ZOOM;
+                    lastDist = dist;
+                    zoomAccum = 0f;
+                    zoomSteps = 0;
+                    // SAI 的 PageUp/PageDown 以光标为中心缩放，先把光标放到两指重心。
+                    moveTo(pad, cx, cy);
+                    flog("GEST zoom begin dist=" + dist0);
+                } else if (canPan) {
+                    beginPan(pad, cx, cy);
+                } else if (canRot) {
+                    beginRotate(pad, angle);
+                } else if (canZoom) {
+                    mode = ZOOM;
+                    lastDist = dist;
+                    zoomAccum = 0f;
+                    zoomSteps = 0;
+                    moveTo(pad, cx, cy);
+                    flog("GEST zoom begin dist=" + dist0);
+                }
+            }
+
+            if (mode == CAND3) {
+                // 三指只在"三根手指都基本没动"时才算轻点；一旦移动就忽略。
+                if (centroidMove > TAP_SLOP || maxTravel(ev) > TAP_SLOP) mode = IGNORE;
+                return;
+            }
+
+            if (mode == PAN) {
+                moveTo(pad, cx, cy);
+                return;
+            }
+
+            if (mode == ROTATE) {
+                // 两指夹角变化 -> Shift+PageUp / Shift+PageDown。
+                // 每次按键约 11.3°，累计到阈值就按一次，方向跟随手指旋转方向。
+                final float delta = normalizeAngle(angle - rotLastAngle);
+                rotLastAngle = angle;
+                rotAccum += delta;
+                while (rotAccum >= ROTATE_STEP_RAD) {
+                    rotateStep(pad, true);
+                    rotAccum -= ROTATE_STEP_RAD;
+                }
+                while (rotAccum <= -ROTATE_STEP_RAD) {
+                    rotateStep(pad, false);
+                    rotAccum += ROTATE_STEP_RAD;
+                }
+                return;
+            }
+
+            if (mode == ZOOM) {
+                zoomAccum += (dist - lastDist);
+                lastDist = dist;
+                // 单个 MOVE 最多注入 3 次，避免两指猛地张开时一次刷出几十级缩放。
+                int sent = 0;
+                while (zoomAccum >= ZOOM_STEP_PX && sent < 3) {
+                    shortcutZoom(pad, true);
+                    zoomAccum -= ZOOM_STEP_PX;
+                    zoomSteps++;
+                    sent++;
+                }
+                while (zoomAccum <= -ZOOM_STEP_PX && sent < 3) {
+                    shortcutZoom(pad, false);
+                    zoomAccum += ZOOM_STEP_PX;
+                    zoomSteps++;
+                    sent++;
+                }
+            }
+        }
+
+        private static void beginPan(View pad, float cx, float cy) {
+            Object xs = xserver(pad);
+            if (xs == null) {
+                mode = IGNORE;
+                return;
+            }
+            mode = PAN;
+            moveTo(pad, cx, cy);
+            spaceHeld = keyDown(xs, KEY_SPACE);
+            pointerDown(pad);
+            leftHeld = true;
+            flog("GEST pan begin");
+        }
+
+        private static void beginRotate(View pad, float angle) {
+            mode = ROTATE;
+            rotLastAngle = angle;
+            rotAccum = 0f;
+            flog("GEST rotate begin (Shift+PageUp/PageDown)");
+        }
+
+        private static void moveTo(View pad, float vx, float vy) {
+            int[] p = toContainerPoint(pad, vx, vy);
+            if (p != null) moveCursorTo(pad, p[0], p[1]);
+        }
+
+        private static void endPointerGesture(View pad) {
+            if (leftHeld) {
+                pointerUp(pad);
+                leftHeld = false;
+            }
+            Object xs = xserver(pad);
+            if (spaceHeld) {
+                keyUp(xs, KEY_SPACE);
+                spaceHeld = false;
+            }
+        }
+
+        private static void finish(View pad) {
+            endPointerGesture(pad);
+            flog("GEST end mode=" + mode);
+            reset();
+        }
+
+        static void cancel(View pad) {
+            if (active) finish(pad);
+            else reset();
+        }
+
+        private static void reset() {
+            mode = IDLE;
+            active = false;
+            startMs = 0;
+            cx0 = cy0 = dist0 = angle0 = lastDist = 0f;
+            rotLastAngle = 0f;
+            rotAccum = 0f;
+            zoomAccum = 0f;
+            zoomSteps = 0;
+            java.util.Arrays.fill(tracked, false);
+        }
+
+        private static void maybeTap(View pad, MotionEvent ev, int count, long now) {
+            if (now - startMs > TAP_MS) {
+                flog("GEST tap too slow dt=" + (now - startMs));
+                return;
+            }
+            if (maxTravel(ev) > TAP_SLOP) {
+                flog("GEST tap moved " + maxTravel(ev));
+                return;
+            }
+            if (count == 2) {
+                shortcutUndo(pad);
+            } else if (count == 3) {
+                shortcutRedo(pad);
+            }
+        }
+
+        private static float maxTravel(MotionEvent ev) {
+            float max = 0f;
+            for (int i = 0; i < ev.getPointerCount(); i++) {
+                int id = ev.getPointerId(i);
+                if (id < 0 || id >= 4 || !tracked[id]) continue;
+                float dx = ev.getX(i) - startX[id];
+                float dy = ev.getY(i) - startY[id];
+                max = Math.max(max, (float) Math.hypot(dx, dy));
+            }
+            return max;
+        }
+
+        private static float normalizeAngle(float a) {
+            while (a > Math.PI) a -= 2 * Math.PI;
+            while (a < -Math.PI) a += 2 * Math.PI;
+            return a;
         }
     }
 

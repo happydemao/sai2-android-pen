@@ -84,6 +84,8 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | [11-bluetooth-keyboard-fix.md](./docs/11-bluetooth-keyboard-fix.md) | 蓝牙键盘不进容器：复合 BLE 键盘被误判成手柄的根因与修复 |
 | [12-wheel-zoom.md](./docs/12-wheel-zoom.md) | 鼠标滚轮改为以光标为中心缩放画布 |
 | [13-pen-cursor-follow.md](./docs/13-pen-cursor-follow.md) | 系统鼠标光标跟随内置笔的悬停/落笔 |
+| [15-touch-gestures.md](./docs/15-touch-gestures.md) | 触控屏手势：两指撤销、三指重做、平移/缩放/旋转、快捏适合窗口 |
+| [16-winlator-chinese.md](./docs/16-winlator-chinese.md) | Winlator 主界面汉化：中文资源、zh_CN 语言项、安装与切换 |
 
 ## 已验证的能力
 
@@ -96,6 +98,8 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | 外接键盘 | ✅ USB 直接可用；复合 BLE 键盘（MCHOSE G75 V2）已修，0.3.4 起内置，见 [11](./docs/11-bluetooth-keyboard-fix.md) |
 | 鼠标滚轮缩放画布 | ✅ 0.3.5 起，滚轮映射为 PageUp/PageDown，见 [12](./docs/12-wheel-zoom.md) |
 | 系统光标跟随笔 | ✅ 0.3.6 起，悬停/落笔都同步系统光标，见 [13](./docs/13-pen-cursor-follow.md) |
+| 触控屏手势（两指撤销/三指重做/平移/缩放/旋转/快捏适合窗口） | ✅ 0.3.8 真机实测，见 [15](./docs/15-touch-gestures.md) |
+| Winlator 主界面中文 | ✅ 0.3.8，318 条文案 + 语言列表「简体中文」，见 [16](./docs/16-winlator-chinese.md) |
 | 手指操作 UI | ⚠️ 可用，双击仍偏难 |
 | 倾斜 / 橡皮 | ⏸ 未做（evdev 有数据，协议无字段，需重编 DLL） |
 | SAI 首笔弹 `FileError(161)` | ⚠️ SAI×Wine 兼容问题，非致命，不影响作画与撤销 |
