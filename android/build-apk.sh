@@ -99,7 +99,7 @@ print(f"added classes{n + 1}.dex (existing dex files: {[x for x in names if x.en
 PY
 
 echo "== align + sign"
-"$BT/zipalign" -f -p 4 -P 16 "$WORK/withdex.apk" "$WORK/aligned.apk"
+"$BT/zipalign" -f -P 16 4 "$WORK/withdex.apk" "$WORK/aligned.apk"
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android \
     --ks-key-alias androiddebugkey --out "$WORK/signed.apk" "$WORK/aligned.apk" 2>/dev/null
 "$BT/apksigner" verify --print-certs "$WORK/signed.apk" | head -2

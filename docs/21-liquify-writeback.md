@@ -474,3 +474,33 @@ AUTO: done (pasted as a new layer)
 下一步把预热改成足够多次的小图调用。
 
 验证：截图里 图层3 是粘贴进来的结果，红线中段被推出 S 形弯，和参数一致。
+
+## 性能真相：debuggable 应用不会 AOT（2026-11-22 01:25）
+
+实测 `cmd package compile -m speed -f lator.forsai` 返回 Success，但
+`dumpsys package` 里仍然是：
+
+```
+arm64: [status=verify] [reason=cmdline] [primary-abi]
+flags=[ DEBUGGABLE ... ]
+```
+
+**debuggable 的应用会被系统强制成 verify（只校验、不编译）**，所以我们的
+`LiquifyWarp` 一直靠解释器执行：
+
+- 1600×1600 forward / 40 步：热身后仍然 **~900ms**；
+- 同一份算法在桌面 JVM 只要 8–12ms（差 ~75 倍，只能解释为没编译）；
+- 对比 Box64 跑 x86 版 `lq.c`：~600ms。
+
+所以「Android 端处理」目前只是**功能正确**（逐字节等价），**性能并没有赢过
+Box64**。拆小方法、预热 12000 次、AOT 编译都没用，因为 debuggable 直接挡住了 AOT。
+
+### 三条出路（下一轮选）
+
+1. **NDK 原生库**（最彻底）：`lq.c` 已经是纯 C99，直接编 `libliquify.so` + JNI，
+   完全绕开 ART。代价是下载 NDK（~1 GB）。
+2. **非 debuggable 构建**：去掉 `android:debuggable`，`pm compile -m speed` 就能
+   生效；但 `run-as` 失效，探针脚本无法再读写容器，需要另找调试通道。
+3. **改用本地 x86 引擎提交**：保持 600ms，牺牲「Android 端处理」这个目标。
+
+下一步倾向 1（NDK），因为它同时解决性能和「Android 端处理」的正确性。
