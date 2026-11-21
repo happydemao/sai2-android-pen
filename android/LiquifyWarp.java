@@ -28,6 +28,29 @@ public final class LiquifyWarp {
     private static final float[] TAB_COS = new float[B + 1];
     private static final float[] TAB_SIN = new float[B + 1];
 
+    /** 原生实现（libliquify.so，就是 lq.c）。加载失败时退回纯 Java 实现。 */
+    private static final boolean NATIVE_OK;
+    private static final String NATIVE_ERR;
+    static {
+        boolean ok;
+        String err = "";
+        try {
+            System.loadLibrary("liquify");
+            ok = true;
+        } catch (Throwable t) {
+            ok = false;
+            err = t.toString();
+        }
+        NATIVE_OK = ok;
+        NATIVE_ERR = err;
+    }
+    private static native void warpNative(byte[] img, int w, int h, int mode,
+                                          float x0, float y0, float x1, float y1,
+                                          float radius, float strength, int steps);
+
+    public static boolean nativeAvailable() { return NATIVE_OK; }
+    public static String nativeError() { return NATIVE_ERR; }
+
     private LiquifyWarp() { }
 
     private static int clamp(int v, int lo, int hi) {
@@ -62,6 +85,12 @@ public final class LiquifyWarp {
         int by1 = clamp((int) Math.ceil(Math.max(y0, y1) + radius + 2), 0, h - 1);
         int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
         if (bw <= 0 || bh <= 0) return img;
+
+        if (NATIVE_OK) {
+            /* same lq.c, compiled for arm64: no ART, no interpretation */
+            warpNative(img, w, h, mode, x0, y0, x1, y1, radius, strength, steps);
+            return img;
+        }
 
         if (mode == SMOOTH)
             return warpSmooth(img, w, h, bx0, bx1, by0, by1,

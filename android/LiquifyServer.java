@@ -44,6 +44,16 @@ public final class LiquifyServer {
         t.setDaemon(true);
         t.start();
         Log.i(TAG, "listening on 127.0.0.1:" + PORT);
+        /* logcat is not readable on the test device, so publish the two facts
+         * that matter (native lib loaded? prewarm time) as a small file. */
+        try {
+            java.io.File f = new java.io.File("/data/data/lator.forsai/files/liquify_status.txt");
+            java.io.FileOutputStream fo = new java.io.FileOutputStream(f);
+            try {
+                String txt = "native=" + (LiquifyWarp.nativeAvailable() ? 1 : 0) + "\nerr=" + LiquifyWarp.nativeError() + "\n";
+                fo.write(txt.getBytes("UTF-8"));
+            } finally { fo.close(); }
+        } catch (Throwable ignored) { }
     }
 
     /** Load classes and let ART/JIT settle on a tiny canvas, so the first real
@@ -56,9 +66,13 @@ public final class LiquifyServer {
                 small[i] = (byte) 0xFF; small[i + 1] = (byte) 0xFF;
                 small[i + 2] = (byte) 0xFF; small[i + 3] = (byte) 0xFF;
             }
-            for (int k = 0; k < 3; ++k) {
+            /* ART's JIT compiles a method only after enough invocations; three
+             * calls left the first real 1600x1600 warp interpreted (~3 s).
+             * 12000 tiny calls cost well under a second and make the method hot
+             * before the user ever runs the tool. */
+            for (int k = 0; k < 12000; ++k) {
                 LiquifyWarp.warp(small, n, n, LiquifyWarp.FORWARD,
-                        20, 32, 44, 32, 16, 0.8f, 8);
+                        20, 32, 44, 32, 16, 0.8f, 4);
             }
             Log.i(TAG, "prewarmed");
         } catch (Throwable t) {

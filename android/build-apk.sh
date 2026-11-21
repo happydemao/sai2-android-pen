@@ -75,6 +75,19 @@ mkdir -p "$WORK/classes" "$WORK/dex"
 "$BT/d8" --release --min-api 26 --lib "$AJAR" --output "$WORK/dex" \
     $(find "$WORK/classes" -name '*.class')
 
+echo "== native lib (libliquify.so)"
+NDK=${NDK:-$ROOT/tools/android-sdk/ndk/26.1.10909125}
+NDK_CC=$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android26-clang
+if [ -x "$NDK_CC" ]; then
+    "$NDK_CC" -shared -fPIC -O2 -fno-builtin -o "$WORK/libliquify.so" \
+        "$HERE/liquify_jni.c" "$REPO/liquify/engine/lq.c" \
+        -I"$REPO/liquify/engine" -Wl,-soname,libliquify.so \
+        -Wl,-z,max-page-size=16384 -lm
+    ls -la "$WORK/libliquify.so"
+else
+    echo "NDK clang not found at $NDK_CC - APK will use the Java fallback"
+fi
+
 echo "== pack dex"
 python3 - "$WORK" <<'PY'
 import sys, zipfile, shutil, pathlib, re, os
@@ -95,6 +108,10 @@ with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED
         data = zin.read(item.filename)
         zout.writestr(item, data)
     zout.writestr(f"classes{n + 1}.dex", (work / "dex/classes.dex").read_bytes())
+    so = work / "libliquify.so"
+    if so.exists():
+        zout.writestr("lib/arm64-v8a/libliquify.so", so.read_bytes())
+        print("added lib/arm64-v8a/libliquify.so")
 print(f"added classes{n + 1}.dex (existing dex files: {[x for x in names if x.endswith('.dex')]})")
 PY
 

@@ -504,3 +504,33 @@ Box64**。拆小方法、预热 12000 次、AOT 编译都没用，因为 debugga
 3. **改用本地 x86 引擎提交**：保持 600ms，牺牲「Android 端处理」这个目标。
 
 下一步倾向 1（NDK），因为它同时解决性能和「Android 端处理」的正确性。
+
+## NDK 原生库：问题解决（2026-11-22 01:32）
+
+把同一份 `lq.c` 编成 `libliquify.so`（arm64），通过 JNI 调用，彻底绕开 ART：
+
+| 实现 | 1600×1600 forward / 40 步 |
+|---|---|
+| Java（debuggable → 解释执行） | ~900 ms |
+| Box64 跑 x86 `lq.c` | ~600 ms |
+| **NDK arm64 `lq.c`** | **63–71 ms** ✅ |
+
+整条链（复制 + 10MB×2 传输 + 变形 + 写回剪贴板）round trip **82–89 ms**。
+
+### 加载原生库踩的 4 个坑（全部在 `build-apk.sh` 里修掉）
+
+1. **16 KB 页对齐**：Android 15+ 要求 `.so` 的段按 16 KB 对齐，否则 dlopen 报
+   「ELF alignment check failed」。链接加 `-Wl,-z,max-page-size=16384`。
+2. **sincosf 不存在**：编译器把 `sinf/cosf` 合并成 `sincosf`，而 app 的
+   targetSdk=28 看不到这个符号（Android 按 targetSdk 过滤 libm 符号）。
+   加 `-fno-builtin`。
+3. **ceilf 找不到**：单文件 `clang -shared` 不会自动链接 libm，`.so` 的
+   DT_NEEDED 里没有 libm.so，Android 的 linker 不做全局符号查找。加 `-lm`。
+4. **调试信息**：logcat 在测试机上读不到（`adb logcat -d` 恒为空），
+   所以 `LiquifyServer` 把 `native=0/1` 和加载错误写进
+   `/data/data/lator.forsai/files/liquify_status.txt`。
+
+Java 实现保留为 fallback（`System.loadLibrary` 失败时用），两条路径
+逐字节一致（见上一节对比测试）。
+
+构建产物：`lib/arm64-v8a/libliquify.so`（12.7 KB），随 APK 一起签名安装。
