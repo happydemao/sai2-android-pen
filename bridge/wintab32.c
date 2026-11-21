@@ -328,7 +328,7 @@ static DWORD g_posted;
 static UINT  g_fetched;    /* last serial SAI actually pulled via WTPacket */
 static unsigned long g_fetch_count;   /* total WTPacket fetches = points SAI actually drew */
 static int   g_dirty;      /* g_last holds a fresher sample than we've posted */
-#define POST_WINDOW 3      /* max unfetched packets before we conflate. 1 = min lag but
+#define POST_WINDOW 96    /* max unfetched packets before we conflate. 1 = min lag but
                               boxy fast curves (drops in-between points); higher = smoother
                               curves, more lag. Measuring SAI's draw rate to tune this. */
 static DWORD g_ring_time[RING_SZ];  /* GetTickCount when each serial was posted (latency probe) */
