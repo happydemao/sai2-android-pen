@@ -1030,6 +1030,10 @@ B64_8
         private static boolean spaceHeld;
         private static boolean leftHeld;
         private static boolean logged;
+        /* 一次手势识别完成后，剩余手指可能还会依次抬起。必须把这些事件
+         * 全部消费掉，否则三指轻点抬起第一指触发重做后，剩下的两指
+         * 会被当成一次新的「两指轻点」，紧接着又触发撤销。 */
+        private static boolean consumeRest;
 
         static boolean onTouch(View pad, MotionEvent ev) {
             final int action = ev.getActionMasked();
@@ -1037,12 +1041,21 @@ B64_8
             final long now = SystemClock.uptimeMillis();
 
             if (action == MotionEvent.ACTION_DOWN) {
+                consumeRest = false;
                 // 正常情况下手势在 UP 时已经结束；这里兜底一次，防止漏掉 UP 后
                 // Space/Alt/左键一直按住。
                 if (active) finish(pad);
                 else reset();
                 trackDown(ev, 0);
                 return false;
+            }
+
+            if (consumeRest) {
+                // 手势已经结束，但还有手指没抬完：全部消费到 ACTION_UP/CANCEL。
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    consumeRest = false;
+                }
+                return true;
             }
             if (action == MotionEvent.ACTION_CANCEL) {
                 if (active) {
@@ -1323,6 +1336,9 @@ B64_8
             endPointerGesture(pad);
             flog("GEST end mode=" + mode);
             reset();
+            // 关键：一次轻点/手势只执行一次动作。剩余手指的 POINTER_UP/UP
+            // 不再参与新的手势识别。
+            consumeRest = true;
         }
 
         static void cancel(View pad) {
