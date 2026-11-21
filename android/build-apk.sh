@@ -47,6 +47,10 @@ env HOME=/private/tmp/apkhome java -jar "$APKTOOL" d -f -r -o "$WORK/dec" "$BASE
 
 echo "== drop stale liquify classes from the decoded tree"
 find "$WORK/dec" -name 'Liquify*.smali' -delete
+# PenBridge is recompiled from source below (pointer-index aware pen detection),
+# so its baked smali must go or it would shadow the new class.
+find "$WORK/dec" \( -name 'PenBridge*.smali' -o -name 'PenBridge\$*.smali' \
+                     -o -name 'CoreTuner*.smali' -o -name 'CoreTuner\$*.smali' \) -delete
 
 echo "== inject smali"
 python3 - "$WORK/dec" <<'PY'
@@ -73,7 +77,7 @@ echo "== javac + d8"
 mkdir -p "$WORK/classes" "$WORK/dex"
 "$JDK/bin/javac" -nowarn -source 8 -target 8 -bootclasspath "$AJAR" \
     -d "$WORK/classes" "$HERE/LiquifyWarp.java" "$HERE/LiquifyServer.java" \
-    "$HERE/LiquifyButton.java"
+    "$HERE/LiquifyButton.java" "$HERE/PenBridge.java" "$HERE/CoreTuner.java"
 "$BT/d8" --release --min-api 26 --lib "$AJAR" --output "$WORK/dex" \
     $(find "$WORK/classes" -name '*.class')
 

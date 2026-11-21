@@ -342,9 +342,9 @@ B64_32_2
     public static void handle(View pad, MotionEvent ev) {
         if (pad == null || ev == null) return;
         ensureBridgeFiles();
-        final boolean pen = isPen(ev);
-        if (pen) TouchGestures.cancel(pad);
-        handleEvent(pad, ev, pen, false, false);
+        final int penIdx = findPenPointer(ev);
+        if (penIdx >= 0) TouchGestures.cancel(pad);
+        handleEvent(pad, ev, penIdx, false, false);
     }
 
     /**
@@ -356,31 +356,34 @@ B64_32_2
     public static boolean handleTouch(View pad, MotionEvent ev) {
         if (pad == null || ev == null) return false;
         ensureBridgeFiles();
-        final boolean pen = isPen(ev);
-        if (pen) {
+        final int penIdx = findPenPointer(ev);
+        if (penIdx >= 0) {
             TouchGestures.cancel(pad);
             /* 关键：笔事件在这里消费掉，返回 true，让原生 TouchpadView 不再
              * 处理同一个 MotionEvent。参考实现也是这样：原生路径会再移一次
              * 光标/处理手指，长线时是双份开销。点击由 syncPenClick() 合成。 */
-            handleEvent(pad, ev, true, false, true);
+            handleEvent(pad, ev, penIdx, false, true);
             return true;
         }
         final boolean consumed = TouchGestures.onTouch(pad, ev);
-        handleEvent(pad, ev, false, consumed, false);
+        handleEvent(pad, ev, -1, consumed, false);
         return consumed;
     }
 
-    private static void handleEvent(View pad, MotionEvent ev, boolean pen, boolean consumed, boolean nativeSkipped) {
+    private static void handleEvent(View pad, MotionEvent ev, int penIdx, boolean consumed, boolean nativeSkipped) {
         try {
+            final boolean pen = penIdx >= 0;
+            final int pi = pen ? penIdx : 0;
             final int action = ev.getActionMasked();
-            final float pressure = ev.getPressure();
+            final float pressure = ev.getPressure(pi);
 
             // 诊断：设备没有 logcat 时写到 app 自己的目录，adb root 可直接读。
             // 悬停事件太多，只记非悬停（DOWN/MOVE/UP 等）。
             if (action != MotionEvent.ACTION_HOVER_MOVE) {
                 flog("ev act=" + action
                         + " src=0x" + Integer.toHexString(ev.getSource())
-                        + " tool=" + ev.getToolType(0)
+                        + " tool=" + ev.getToolType(pi)
+                        + " ptr=" + pi + "/" + ev.getPointerCount()
                         + " pr=" + pressure
                         + " synth=" + needsSyntheticClick(ev)
                         + " t=" + SystemClock.uptimeMillis());
@@ -389,8 +392,8 @@ B64_32_2
             float[] xf = pen ? getXform(pad) : null;
             int[] xy, xys;
             if (pen) {
-                xy = mapPoint(xf, ev.getX(), ev.getY());
-                xys = mapPointScaled(xf, ev.getX(), ev.getY());
+                xy = mapPoint(xf, ev.getX(pi), ev.getY(pi));
+                xys = mapPointScaled(xf, ev.getX(pi), ev.getY(pi));
             } else {
                 xy = toContainer(pad, ev);
                 xys = toContainerScaled(pad, ev);
@@ -401,7 +404,7 @@ B64_32_2
 
             // 诊断：只对 DOWN 记录一次原始/变换后坐标，确认为什么画笔会贴边
             if (action == MotionEvent.ACTION_DOWN) {
-                flog("MAP view=" + (int) ev.getX() + "," + (int) ev.getY()
+                flog("MAP view=" + (int) ev.getX(pi) + "," + (int) ev.getY(pi)
                         + " raw=" + (int) ev.getRawX() + "," + (int) ev.getRawY()
                         + " viewSize=" + pad.getWidth() + "x" + pad.getHeight()
                         + " screen=" + screenW + "x" + screenH
@@ -425,9 +428,9 @@ B64_32_2
             // SAI，按样本移动是 Box64 下最大的输入开销。
             final int hist = ev.getHistorySize();
             for (int h = 0; h < hist; h++) {
-                int[] hxys = mapPointScaled(xf, ev.getHistoricalX(h), ev.getHistoricalY(h));
+                int[] hxys = mapPointScaled(xf, ev.getHistoricalX(pi, h), ev.getHistoricalY(pi, h));
                 if (hxys != null) {
-                    emit(hxys[0], hxys[1], ev.getHistoricalPressure(h),
+                    emit(hxys[0], hxys[1], ev.getHistoricalPressure(pi, h),
                          MotionEvent.ACTION_MOVE, false, true);
                 }
             }
@@ -444,7 +447,7 @@ B64_32_2
             if (!loggedPen) {
                 loggedPen = true;
                 note("pen src=0x" + Integer.toHexString(ev.getSource())
-                        + " tool=" + ev.getToolType(0)
+                        + " tool=" + ev.getToolType(pi) + " ptr=" + pi
                         + " synth=" + needsSyntheticClick(ev));
             }
             if (needsSyntheticClick(ev)) {
@@ -584,13 +587,47 @@ B64_32_2
     }
 
     private static boolean isPen(MotionEvent ev) {
+        return findPenPointer(ev) >= 0;
+    }
+
+    /**
+     * 找到这支笔在 MotionEvent 里的 pointer index（没有笔返回 -1）。
+     *
+     * 旧版只看 pointer 0、只认 STYLUS，于是：
+     *  - 笔上报在 pointer 1（和手指同时在场）时被当成手指，压感路径整条作废；
+     *  - ERASER（橡皮端）不认；
+     *  - 华为这类把笔报成 TOOL_TYPE_FINGER 的设备完全不认。
+     * 现在遍历所有 pointer，STYLUS/ERASER 都算笔；toolType 不可信时按输入设备
+     * 名里的 "pen" 兜底，并挑压力最大的那个 pointer。
+     */
+    private static int findPenPointer(MotionEvent ev) {
+        if (ev == null) return -1;
         try {
-            InputDevice dev = ev.getDevice();
-            if (dev != null) {
-                String name = dev.getName();
-                if (name != null && name.toLowerCase().contains("pen")) return true;
+            final int n = ev.getPointerCount();
+            for (int i = 0; i < n; i++) {
+                final int t = ev.getToolType(i);
+                if (t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER) return i;
             }
-            return ev.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS;
+            if (isPenDevice(ev.getDevice())) {
+                int best = n > 0 ? 0 : -1;
+                float bp = -1f;
+                for (int i = 0; i < n; i++) {
+                    float p = ev.getPressure(i);
+                    if (p > bp) { bp = p; best = i; }
+                }
+                return best;
+            }
+            return -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static boolean isPenDevice(InputDevice dev) {
+        try {
+            if (dev == null) return false;
+            String name = dev.getName();
+            return name != null && name.toLowerCase(java.util.Locale.US).contains("pen");
         } catch (Throwable t) {
             return false;
         }
