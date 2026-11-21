@@ -2587,8 +2587,10 @@ static void doc_capture(void) {
 
     char title[128] = ""; GetWindowTextA(g_cv_dst, title, (int)sizeof title - 1);
     int zoom = 100;
+    /* the title only carries a zoom when it looks like "(150%)"; the document
+     * name ends with "(*)" and atoi on that produced nonsense scales */
     const char *pc = strrchr(title, '(');
-    if (pc) zoom = atoi(pc + 1);
+    if (pc && strchr(pc, '%') && strchr(pc, '%') < pc + 12) zoom = atoi(pc + 1);
     if (zoom <= 0 || zoom > 6400) zoom = 100;
     g_doc_zoom = zoom;
 
@@ -3307,12 +3309,24 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     if (g_hwnd) {
         SetForegroundWindow(g_hwnd);
         SetFocus(g_hwnd);
-        Sleep(250);
+        Sleep(400);
     }
-    /* 1. capture the document through SAI's own clipboard copy */
+    {
+        HWND fg = GetForegroundWindow();
+        char fc[64] = "", ft[96] = "";
+        if (fg) { GetClassNameA(fg, fc, (int)sizeof fc - 1); GetWindowTextA(fg, ft, (int)sizeof ft - 1); }
+        ms_log("UI: foreground=%p class=%s title=%s", (void*)fg, fc, ft);
+    }
+    /* 1. capture the document through SAI's own clipboard copy.
+     * Deselect first: with an active selection Ctrl+C copies just its bounding
+     * box, which looks like a "wrong paper size" to the user. Ctrl+A alone
+     * should replace it, but SAI keeps the old selection when the key never
+     * reaches it, so drop it explicitly. */
     if (OpenClipboard(NULL)) { EmptyClipboard(); CloseClipboard(); }
-    send_ctrl_key('A');
+    send_ctrl_key('D');
     Sleep(120);
+    send_ctrl_key('A');
+    Sleep(200);
     send_ctrl_key('C');
     int got = 0;
     for (int i = 0; i < 40; ++i) { Sleep(100); if (clipboard_has_dib()) { got = 1; break; } }
@@ -3357,8 +3371,10 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     char title[128] = "";
     if (canvas) GetWindowTextA(canvas, title, (int)sizeof title - 1);
     int zoom = 100;
+    /* the title only carries a zoom when it looks like "(150%)"; the document
+     * name ends with "(*)" and atoi on that produced nonsense scales */
     const char *pc = strrchr(title, '(');
-    if (pc) zoom = atoi(pc + 1);
+    if (pc && strchr(pc, '%') && strchr(pc, '%') < pc + 12) zoom = atoi(pc + 1);
     if (zoom <= 0 || zoom > 6400) zoom = 100;
     g_ui_sc = zoom / 100.0f;
     int pw = (int)(w * g_ui_sc), ph = (int)(h * g_ui_sc);

@@ -420,7 +420,9 @@ B64_32_2
 
             // ---------------- 以下全部是笔的原有逻辑 ----------------
             // 橡皮端：告诉 DLL 把 packet 的 cursor 换成 cursor 2（SAI 靠这个切橡皮）
-            final boolean eraser = ev.getToolType(pi) == MotionEvent.TOOL_TYPE_ERASER;
+            /* the eraser is either the pen's eraser end (TOOL_TYPE_ERASER) or
+             * the barrel button held down (stylus primary/secondary). */
+            final boolean eraser = ev.getToolType(pi) == MotionEvent.TOOL_TYPE_ERASER || barrelDown(ev);
             if (eraser != eraserSent) {
                 eraserSent = eraser;
                 sendControl(eraser ? "E 1" : "E 0");
@@ -629,6 +631,19 @@ B64_32_2
             return -1;
         } catch (Throwable t) {
             return -1;
+        }
+    }
+
+    private static boolean barrelDown(MotionEvent ev) {
+        try {
+            int b = ev.getButtonState();
+            int mask = MotionEvent.BUTTON_PRIMARY | MotionEvent.BUTTON_SECONDARY;
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                mask |= MotionEvent.BUTTON_STYLUS_PRIMARY | MotionEvent.BUTTON_STYLUS_SECONDARY;
+            }
+            return (b & mask) != 0;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
