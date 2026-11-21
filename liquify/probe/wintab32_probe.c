@@ -1990,10 +1990,103 @@ static void ms_run(void) {
     ms_log("done: %d regions (%d >=4MB), %d hits", regions, big, hits);
 }
 
+/* ---- memory fingerprint / diff -------------------------------------------
+ * Format-agnostic way to find where a document edit lands: hash every 64 KB
+ * chunk of the process, make the user draw one dot, hash again, and dump the
+ * chunks whose hash moved. The layer storage must be among them, whatever its
+ * pixel layout is.
+ */
+#define SNAP_CHUNK (64 * 1024)
+typedef struct { unsigned __int64 addr; unsigned int size; unsigned __int64 hash; } SnapEnt;
+static SnapEnt *g_snap;
+static int g_snap_n, g_snap_cap;
+
+static unsigned __int64 fnv1a(const unsigned char *p, size_t n) {
+    unsigned __int64 h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static void snap_collect(void) {
+    HANDLE self = GetCurrentProcess();
+    unsigned char *buf = (unsigned char*)malloc(SNAP_CHUNK);
+    if (!buf) return;
+    g_snap_n = 0;
+    unsigned __int64 addr = 0x10000;
+    while (addr < 0x7FFFFFFF0000ull) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPCVOID)(uintptr_t)addr, &mbi, sizeof mbi)) break;
+        unsigned __int64 base = (unsigned __int64)(uintptr_t)mbi.BaseAddress;
+        unsigned __int64 size = (unsigned __int64)mbi.RegionSize;
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) &&
+            !(mbi.Protect & PAGE_GUARD)) {
+            for (unsigned __int64 off = 0; off < size; off += SNAP_CHUNK) {
+                SIZE_T want = (SIZE_T)((size - off > SNAP_CHUNK) ? SNAP_CHUNK : (size - off));
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)(base + off), buf, want, &got)) continue;
+                if (got < 16) continue;
+                if (g_snap_n >= g_snap_cap) {
+                    int nc = g_snap_cap ? g_snap_cap * 2 : 65536;
+                    SnapEnt *nn = (SnapEnt*)realloc(g_snap, (size_t)nc * sizeof(SnapEnt));
+                    if (!nn) break;
+                    g_snap = nn; g_snap_cap = nc;
+                }
+                g_snap[g_snap_n].addr = base + off;
+                g_snap[g_snap_n].size = (unsigned int)got;
+                g_snap[g_snap_n].hash = fnv1a(buf, got);
+                ++g_snap_n;
+            }
+        }
+        if (size == 0) break;
+        addr = base + size;
+    }
+    free(buf);
+}
+
+static void snap_diff(void) {
+    HANDLE self = GetCurrentProcess();
+    unsigned char *buf = (unsigned char*)malloc(SNAP_CHUNK);
+    if (!buf || !g_snap) { free(buf); return; }
+    int changed = 0, dumps = 0;
+    for (int i = 0; i < g_snap_n; ++i) {
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)g_snap[i].addr, buf,
+                               g_snap[i].size, &got) || got != g_snap[i].size) continue;
+        unsigned __int64 h = fnv1a(buf, got);
+        if (h == g_snap[i].hash) continue;
+        ++changed;
+        ms_log("CHANGED %p size=%u", (void*)(uintptr_t)g_snap[i].addr, g_snap[i].size);
+        if (dumps < 24) {
+            char path[64];
+            _snprintf(path, sizeof path - 1, "C:\\wt_diff_%02d.bin", dumps);
+            path[sizeof path - 1] = 0;
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(buf, 1, got, f); fclose(f); }
+            ms_log("  dumped %s", path);
+            ++dumps;
+        }
+    }
+    ms_log("diff done: %d chunks changed of %d, %d dumped", changed, g_snap_n, dumps);
+    free(buf);
+}
+
 static DWORD WINAPI memscan_thread(LPVOID p) {
     (void)p;
     for (;;) {
         Sleep(300);
+        if (GetFileAttributesA("C:\\wt_snap") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_snap");
+            snap_collect();
+            ms_log("SNAP recorded %d chunks", g_snap_n);
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_diff") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_diff");
+            ms_log("==== diff ====");
+            snap_diff();
+            continue;
+        }
         if (GetFileAttributesA("C:\\wt_dump.txt") != INVALID_FILE_ATTRIBUTES) {
             FILE *cf = fopen("C:\\wt_dump.txt", "r");
             unsigned long long a = 0; unsigned int len = 0;

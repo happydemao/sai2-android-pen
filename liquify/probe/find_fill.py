@@ -125,7 +125,12 @@ def main():
         adb("shell", f"run-as lator.forsai sh -c 'cat > {P}/wt_pattern.bin'",
             stdin=open("/private/tmp/lq_pat.bin", "rb"))
         shell(f"touch {P}/wt_memscan")
-        subprocess.run(["sleep", "25"], check=True)
+        for _ in range(40):
+            subprocess.run(["sleep", "2"], check=True)
+            peek = adb("exec-out", "run-as lator.forsai sh -c",
+                       f"cat {P}/wt_memscan.log", capture_output=True).stdout.decode("utf-8", "replace")
+            if "done:" in peek:
+                break
         log = adb("exec-out", "run-as lator.forsai sh -c", f"cat {P}/wt_memscan.log",
                   capture_output=True).stdout.decode("utf-8", "replace")
         hits = [l for l in log.splitlines() if l.startswith("HIT")]
