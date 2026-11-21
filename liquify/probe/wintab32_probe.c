@@ -3348,25 +3348,12 @@ static void send_plain_key(char c) {
 
 static void ui_commit(void) {
     if (!g_ui.doc) return;
-    /* A trimmed copy pasted at the origin would land in the top-left corner.
-     * Pad it back to the document coordinates it was copied from. */
     int w = g_ui.dw, h = g_ui.dh;
-    unsigned char *img = g_ui.doc, *pad = NULL;
-    if (g_doc_offx > 0 || g_doc_offy > 0) {
-        int pw = w + g_doc_offx, ph = h + g_doc_offy;
-        pad = (unsigned char*)calloc((size_t)pw * 4 * ph, 1);
-        if (pad) {
-            for (int y = 0; y < h; ++y)
-                memcpy(pad + ((size_t)(y + g_doc_offy) * pw + g_doc_offx) * 4,
-                       g_ui.doc + (size_t)y * w * 4, (size_t)w * 4);
-            img = pad; w = pw; h = ph;
-        }
-    }
+    unsigned char *img = g_ui.doc;
     FILE *f = fopen("C:\\wt_paste.bin", "wb");
     if (f) { fwrite(img, 1, (size_t)w * 4 * h, f); fclose(f); }
     FILE *t = fopen("C:\\wt_paste.txt", "wb");
     if (t) { fprintf(t, "%d %d", w, h); fclose(t); }
-    free(pad);
     doc_paste();
     /* the overlay owns the focus; hand it back to SAI or the Ctrl+V lands on
      * the (about to be destroyed) overlay window */
@@ -3523,7 +3510,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     g_cv_screen_x = o.x;
     g_cv_screen_y = o.y;
     int pw, ph, pl, pt;
-    if (ui_detect_paper()) {
+    if (0 && ui_detect_paper()) {
         /* the viewport knows the real paper rectangle even when the clipboard
          * copy was trimmed to the painted content */
         pw = g_paper_dib_w;
