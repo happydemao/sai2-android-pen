@@ -158,3 +158,16 @@ UDP 发送在独立线程，UI 线程只入队，不阻塞。
 在 SM-X810 / Snapdragon 8 Gen 2 上实测，打开 `saipen-cores-on` 后长线更卡。
 `CoreTuner` 把 11 个 SAI 线程全放到 4 个大核，反而造成排队。保持默认关闭，
 不再启用。
+
+## 0.3.28：日志关闭 + 按帧耗时抽稀
+
+- `flog()` 默认关闭（`DEBUG_LOG=false`），不再每个笔事件同步 `write/flush` 到
+  `pb.log`；诊断时才打开。
+- 新增 `Choreographer` 帧时钟，记录最近帧间隔 `frameMs`。
+- 抽稀距离取“队列积压”和“实际帧耗时”两者的较大值：
+  - 帧耗时 > 17ms：2px
+  - > 20ms：4px
+  - > 24ms：7px
+  - > 32ms：10px
+
+快的时候不丢，SAI 真正开始卡时才提前丢点。

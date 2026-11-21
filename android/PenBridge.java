@@ -3,6 +3,7 @@ package com.winlator.sai;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
+import android.view.Choreographer;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -37,6 +38,8 @@ import java.nio.charset.StandardCharsets;
 public final class PenBridge {
 
     private static final String TAG = "SaiPen";
+    /* 默认关闭逐事件写文件；诊断时改 true。 */
+    private static final boolean DEBUG_LOG = false;
     private static final int PORT = 47800;
     private static final int PMAX = 4095;
     /* 发送给 wintab32.dll 的坐标用 8 倍定点：协议里 x/w、y/h 只取比例，
@@ -140,6 +143,10 @@ public final class PenBridge {
     private static long lastPenEventMs;
     /** 最近一次笔尖接触（给 CoreTuner 判断是否在画）。 */
     private static volatile long lastPenTouchMs;
+    /* 渲染帧间隔（Choreographer 测得），用于按实际卡顿程度抽稀。 */
+    private static volatile float frameMs = 16.7f;
+    private static long lastFrameNs;
+    private static boolean frameClockStarted;
     /** 只在第一次见到笔时打一条诊断日志（设备源类型）。 */
     private static boolean loggedPen;
 
@@ -279,6 +286,7 @@ B64_32_2
     public static void configure(int width, int height) {
         ensureBridgeFiles();
         CoreTuner.start();
+        startFrameClock();
         try {
             if (width > 0 && height > 0) {
                 screenW = width;
@@ -291,6 +299,33 @@ B64_32_2
     /** 最近 1.2s 内是否有笔尖接触，CoreTuner 用。 */
     static boolean isDrawingRecently() {
         return SystemClock.uptimeMillis() - lastPenTouchMs < 1200;
+    }
+
+    /** 按帧耗时和队列积压决定最小保留距离（px）。 */
+    private static int thinningDistance(int queue) {
+        int byQueue = queue > 512 ? 10 : queue > 256 ? 7 : queue > 128 ? 4 : queue > 64 ? 2 : 0;
+        float f = frameMs;
+        int byFrame = f > 32f ? 10 : f > 24f ? 7 : f > 20f ? 4 : f > 17f ? 2 : 0;
+        return Math.max(byQueue, byFrame);
+    }
+
+    private static void startFrameClock() {
+        if (frameClockStarted) return;
+        frameClockStarted = true;
+        try {
+            Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+                @Override public void doFrame(long frameTimeNanos) {
+                    if (lastFrameNs != 0) {
+                        float dt = (frameTimeNanos - lastFrameNs) / 1000000f;
+                        if (dt >= 1f && dt <= 100f) {
+                            frameMs = frameMs * 0.85f + dt * 0.15f;
+                        }
+                    }
+                    lastFrameNs = frameTimeNanos;
+                    Choreographer.getInstance().postFrameCallback(this);
+                }
+            });
+        } catch (Throwable ignored) { }
     }
 
     /** 诊断日志。 */
@@ -525,7 +560,8 @@ B64_32_2
     private static int logCount;
 
     private static void flog(String s) {
-        if (logCount > 400) return;
+        if (!DEBUG_LOG) return;
+        if (logCount > 200) return;
         try {
             if (logWriter == null) {
                 logWriter = new java.io.FileWriter("/data/data/com.winlator/files/pb.log", false);
@@ -1728,10 +1764,7 @@ B64_32_2
                      * 上一个入队点很近的样本，线的形状和拐点都还在。 */
                     hasPending = false;
                     int q = CRIT.size();
-                    int minD = q > 512 ? 10 * POS_SCALE
-                             : q > 256 ? 7 * POS_SCALE
-                             : q > 128 ? 4 * POS_SCALE
-                             : q > 64  ? 2 * POS_SCALE : 0;
+                    int minD = thinningDistance(q) * POS_SCALE;
                     if (minD > 0 && lastQueuedX > -99999) {
                         long dx = (long) x - lastQueuedX;
                         long dy = (long) y - lastQueuedY;
