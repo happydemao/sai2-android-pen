@@ -2417,62 +2417,7 @@ static void guard_whole_dib(void) {
  * Candidates are logged with a pixel signature (how many f8f8f8 paper pixels
  * in the first 64 KB) so view surfaces, layer surfaces and scratch buffers can
  * be told apart without dumping tens of megabytes. */
-static void find_surfaces(void) {
-    FILE *f = fopen("C:\\wt_surfaces.log", "wb");
-    if (!f) return;
-    HANDLE self = GetCurrentProcess();
-    unsigned char *chunk = (unsigned char*)malloc(1u << 20);
-    unsigned char *sig = (unsigned char*)malloc(0x10000);
-    if (!chunk || !sig) { free(chunk); free(sig); fclose(f); return; }
-    fprintf(f, "scan start\n");
-    unsigned long long addr = 0x10000;
-    int cands = 0;
-    while (addr < 0x7FFFFFFF0000ull) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery((LPCVOID)(uintptr_t)addr, &mbi, sizeof mbi)) break;
-        unsigned long long base = (unsigned long long)(uintptr_t)mbi.BaseAddress;
-        unsigned long long size = (unsigned long long)mbi.RegionSize;
-        if (size == 0) break;
-        if (mbi.State == MEM_COMMIT &&
-            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) &&
-            !(mbi.Protect & PAGE_GUARD)) {
-            for (unsigned long long off = 0; off < size; off += (1u << 20)) {
-                SIZE_T want = (SIZE_T)((size - off > (1u << 20)) ? (1u << 20) : (size - off));
-                SIZE_T got = 0;
-                if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)(base + off), chunk, want, &got) || got < 0x40)
-                    continue;
-                for (SIZE_T i = 0; i + 0x30 <= got; i += 8) {
-                    int w, h, stride;
-                    unsigned long long bits;
-                    memcpy(&w, chunk + i + 8, 4);
-                    memcpy(&h, chunk + i + 0xc, 4);
-                    memcpy(&stride, chunk + i + 0x10, 4);
-                    memcpy(&bits, chunk + i + 0x18, 8);
-                    if (w < 64 || w > 8192 || h < 64 || h > 8192) continue;
-                    if (stride < w * 4 || stride > w * 4 + 0x1000) continue;
-                    if (bits < 0x10000 || bits > 0x7FFFFFFF0000ull) continue;
-                    SIZE_T g2 = 0;
-                    if (!ReadProcessMemory(self, (LPCVOID)(uintptr_t)bits, sig, 0x10000, &g2) || g2 < 0x10000)
-                        continue;
-                    int paper = 0, ink = 0;
-                    for (int k = 0; k + 4 <= 0x10000; k += 4) {
-                        int b = sig[k], g = sig[k+1], r = sig[k+2];
-                        if (b >= 0xF0 && g >= 0xF0 && r >= 0xF0) ++paper;
-                        else if (b <= 0x10 && g <= 0x10 && r <= 0x10) ++ink;
-                    }
-                    if (paper + ink < 500) continue;
-                    ++cands;
-                    fprintf(f, "SURFACE obj=%llx w=%d h=%d stride=%d bits=%llx "
-                               "paper=%d ink=%d\n",
-                            base + off + i, w, h, stride, bits, paper, ink);
-                }
-            }
-        }
-        addr = base + size;
-    }
-    fprintf(f, "done candidates=%d\n", cands);
-    free(chunk); free(sig); fclose(f);
-}
+
 
 /* Find decoded image blocks: 64 KB-aligned buffers that look like a 256x256
  * 32bpp slice of the canvas, i.e. mostly paper white *and* carrying ink.
@@ -3042,7 +2987,10 @@ static void ui_render_rect(int dx0, int dy0, int dx1, int dy1);
 static void ui_commit(void);
 static void ui_close(void);
 
-static int g_ui_w, g_ui_h, g_ui_x, g_ui_y;   /* g_ui_w/h = paper size */
+static int g_ui_w, g_ui_h, g_ui_x, g_ui_y;   /* g_ui_w/h = visible paper size */
+static float g_ui_sc = 1.0f;                  /* doc px -> surface px */
+static float g_ui_offx, g_ui_offy;            /* doc coords at surface (0,bar+h) */
+static volatile int g_ui_starting;
 #define UI_BAR_H 34
 static int g_ui_clicks;                        /* taps seen, so a tap can act */
 
@@ -3077,15 +3025,27 @@ static int g_cur_x = -1, g_cur_y = -1, g_cur_r = -1;
 
 static void ui_draw_cursor(int cx, int cy, int rad) {
     if (!g_ui_bits) return;
-    for (int a = 0; a < 720; ++a) {
-        double th = a * 3.14159265358979 / 360.0;
-        int x = cx + (int)(rad * cos(th));
-        int y = cy + (int)(rad * sin(th));
-        if (x < 0 || y < UI_BAR_H || x >= g_ui_w || y >= UI_BAR_H + g_ui_h) continue;
-        unsigned char *px = g_ui_bits + ((size_t)y * g_ui_w + x) * 4;
-        int on = (a / 16) & 1;
-        px[0] = on ? 255 : 0; px[1] = on ? 255 : 0; px[2] = on ? 255 : 0; px[3] = 0xFF;
+    for (int rr = rad - 1; rr <= rad; ++rr) {
+        for (int a = 0; a < 720; ++a) {
+            double th = a * 3.14159265358979 / 360.0;
+            int x = cx + (int)(rr * cos(th));
+            int y = cy + (int)(rr * sin(th));
+            if (x < 0 || y < UI_BAR_H || x >= g_ui_w || y >= UI_BAR_H + g_ui_h) continue;
+            unsigned char *px = g_ui_bits + ((size_t)y * g_ui_w + x) * 4;
+            int on = (a / 24) & 1;
+            px[0] = on ? 255 : 0; px[1] = on ? 255 : 0; px[2] = on ? 255 : 0; px[3] = 0xFF;
+        }
     }
+}
+
+static void ui_erase_ring(void);
+static void ui_refresh_ring(int cx, int cy) {
+    int rad = (int)(g_ui.radius * g_ui_sc);
+    if (rad < 3) rad = 3;
+    if (g_cur_r == rad && g_cur_x == cx && g_cur_y == cy) return;
+    ui_erase_ring();
+    ui_draw_cursor(cx, cy, rad);
+    g_cur_x = cx; g_cur_y = cy; g_cur_r = rad;
 }
 
 static void ui_erase_ring(void) {
@@ -3174,12 +3134,14 @@ static void ui_render_rect(int dx0, int dy0, int dx1, int dy1) {
     if (dy0 < 0) dy0 = 0;
     if (dx1 > g_ui.dw - 1) dx1 = g_ui.dw - 1;
     if (dy1 > g_ui.dh - 1) dy1 = g_ui.dh - 1;
-    for (int oy = dy0 * g_ui_h / g_ui.dh; oy <= dy1 * g_ui_h / g_ui.dh; ++oy) {
+    for (int oy = (int)((dy0 - g_ui_offy) * g_ui_sc); oy <= (int)((dy1 - g_ui_offy) * g_ui_sc); ++oy) {
         if (oy < 0 || oy >= g_ui_h) continue;
-        int sy = oy * g_ui.dh / g_ui_h;
-        for (int ox = dx0 * g_ui_w / g_ui.dw; ox <= dx1 * g_ui_w / g_ui.dw; ++ox) {
+        int sy = (int)(g_ui_offy + oy / g_ui_sc);
+        if (sy < 0 || sy >= g_ui.dh) continue;
+        for (int ox = (int)((dx0 - g_ui_offx) * g_ui_sc); ox <= (int)((dx1 - g_ui_offx) * g_ui_sc); ++ox) {
             if (ox < 0 || ox >= g_ui_w) continue;
-            int sx = ox * g_ui.dw / g_ui_w;
+            int sx = (int)(g_ui_offx + ox / g_ui_sc);
+            if (sx < 0 || sx >= g_ui.dw) continue;
             const unsigned char *src = g_ui.doc + ((size_t)sy * g_ui.dw + sx) * 4;
             unsigned char *dst = g_ui_bits + ((size_t)(oy + UI_BAR_H) * g_ui_w + ox) * 4;
             dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
@@ -3243,8 +3205,8 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
             ui_bar_click((int)LOWORD(l), cy);
             return 0;
         }
-        float dx = (float)LOWORD(l) * g_ui.dw / g_ui_w;
-        float dy = (float)(cy - UI_BAR_H) * g_ui.dh / g_ui_h;
+        float dx = g_ui_offx + (float)LOWORD(l) / g_ui_sc;
+        float dy = g_ui_offy + (float)(cy - UI_BAR_H) / g_ui_sc;
         ms_log("UI: down at doc %.0f,%.0f", dx, dy);
         SetCapture(h);
         g_ui.down = 1;
@@ -3331,7 +3293,8 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     else if (!strcmp(mspec, "twirl_ccw")) g_ui.mode = 4;
     else if (!strcmp(mspec, "smooth")) g_ui.mode = 5;
 
-    /* 3. paper rect: centred in the canvas child at the current zoom */
+    /* 3. paper rect: zoom from the title, origin from the last blit so a
+     * scrolled / 100% document is covered correctly, clipped to the canvas. */
     RECT rc; GetClientRect(g_cv_dst, &rc);
     POINT o = { 0, 0 }; ClientToScreen(g_cv_dst, &o);
     char title[128] = ""; GetWindowTextA(g_cv_dst, title, (int)sizeof title - 1);
@@ -3339,11 +3302,28 @@ static DWORD WINAPI ui_thread(LPVOID p) {
     const char *pc = strrchr(title, '(');
     if (pc) zoom = atoi(pc + 1);
     if (zoom <= 0 || zoom > 6400) zoom = 100;
-    g_ui_w = w * zoom / 100;
-    g_ui_h = h * zoom / 100;
-    if (g_ui_w < 32 || g_ui_h < 32) { ui_close(); ms_log("UI: bad paper %dx%d", g_ui_w, g_ui_h); return 0; }
-    g_ui_x = o.x + (rc.right - g_ui_w) / 2;
-    g_ui_y = o.y + (rc.bottom - g_ui_h) / 2 - UI_BAR_H;
+    g_ui_sc = zoom / 100.0f;
+    int pw = (int)(w * g_ui_sc), ph = (int)(h * g_ui_sc);
+    int pl = o.x + (rc.right - pw) / 2, pt = o.y + (rc.bottom - ph) / 2;
+    if (g_cv_dst) {
+        if (g_cv_cx >= 8 && g_cv_cy >= 8) {
+            /* dest(x,y) shows document (sx,sy): recover the paper origin */
+            pl = o.x + g_cv_x - (int)(g_cv_sx * g_ui_sc);
+            pt = o.y + g_cv_y - (int)(g_cv_sy * g_ui_sc);
+        }
+    }
+    int vl = pl, vt = pt, vr = pl + pw, vb = pt + ph;
+    if (vl < o.x) vl = o.x;
+    if (vt < o.y) vt = o.y;
+    if (vr > o.x + rc.right) vr = o.x + rc.right;
+    if (vb > o.y + rc.bottom) vb = o.y + rc.bottom;
+    if (vr - vl < 32 || vb - vt < 32) { ui_close(); g_ui_starting = 0; ms_log("UI: bad paper %dx%d", w, h); return 0; }
+    g_ui_w = vr - vl;
+    g_ui_h = vb - vt;
+    g_ui_x = vl;
+    g_ui_y = vt - UI_BAR_H;
+    g_ui_offx = (float)(vl - pl) / g_ui_sc;
+    g_ui_offy = (float)(vt - pt) / g_ui_sc;
 
     /* 4. surface + window */
     BITMAPINFO bi; memset(&bi, 0, sizeof bi);
@@ -3399,20 +3379,18 @@ static DWORD WINAPI ui_thread(LPVOID p) {
                      p.y < g_ui_y + UI_BAR_H + g_ui_h;
         int over = in_bar || in_doc;
         int down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-        float dx = (float)(p.x - g_ui_x) * g_ui.dw / g_ui_w;
-        float dy = (float)(p.y - g_ui_y - UI_BAR_H) * g_ui.dh / g_ui_h;
+        float dx = g_ui_offx + (float)(p.x - g_ui_x) / g_ui_sc;
+        float dy = g_ui_offy + (float)(p.y - g_ui_y - UI_BAR_H) / g_ui_sc;
 
         if (!down && in_doc) {
             int cx = (int)(p.x - g_ui_x);
             int cy = (int)(p.y - g_ui_y);
-            int rad = (int)((double)g_ui.radius * g_ui_w / g_ui.dw);
+            int rad = (int)(g_ui.radius * g_ui_sc);
             if (rad < 3) rad = 3;
-            if (abs(cx - g_cur_x) >= 2 || abs(cy - g_cur_y) >= 2 ||
-                rad != g_cur_r) {
-                ui_erase_ring();
-                ui_draw_cursor(cx, cy, rad);
+            (void)rad;
+            if (abs(cx - g_cur_x) >= 2 || abs(cy - g_cur_y) >= 2) {
+                ui_refresh_ring(cx, cy);
                 ui_update_window();
-                g_cur_x = cx; g_cur_y = cy; g_cur_r = rad;
             }
         } else if (g_cur_r > 0) {
             ui_erase_ring();
@@ -3445,6 +3423,7 @@ static DWORD WINAPI ui_thread(LPVOID p) {
                 lq_flush(g_ui.ctx, &a[0], &a[1], &a[2], &a[3]);
                 if (a[0] >= 0) {
                     ui_render_rect(a[0], a[1], a[2], a[3]);
+                    ui_refresh_ring(p.x - g_ui_x, p.y - g_ui_y);
                     ui_update_window();
                 }
             }
@@ -3455,30 +3434,9 @@ static DWORD WINAPI ui_thread(LPVOID p) {
             g_ui_press_max = 0;
         }
 
-        {
-            static int hb;
-            if ((hb++ % 60) == 0)
-                ms_log("UI: cur %d,%d over=%d down=%d", (int)p.x, (int)p.y, over, down);
-        }
         /* The Winlator input path does not surface the keyboard or mouse
          * button state to Wine (GetAsyncKeyState stays 0), so the commit and
          * cancel actions are also exposed as files for now. */
-        if (GetFileAttributesA("C:\\wt_ui_undo") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_ui_undo");
-            if (g_ui.ctx && lq_undo(g_ui.ctx)) {
-                ui_render_rect(0, 0, g_ui.dw - 1, g_ui.dh - 1);
-                ui_update_window();
-                ms_log("UI: undo");
-            }
-        }
-        if (GetFileAttributesA("C:\\wt_ui_done") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_ui_done");
-            ui_commit(); ui_close(); break;
-        }
-        if (GetFileAttributesA("C:\\wt_ui_cancel") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_ui_cancel");
-            ui_close(); break;
-        }
         if (GetAsyncKeyState(VK_RETURN) & 0x8000) { ui_commit(); ui_close(); break; }
         if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { ui_close(); break; }
         Sleep(16);
@@ -3497,7 +3455,10 @@ static int g_hotkey_started;
 
 static LRESULT CALLBACK hotkey_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_HOTKEY && w == 1) {
-        if (!g_ui_hwnd) CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
+        if (!g_ui_hwnd && !g_ui_starting) {
+            g_ui_starting = 1;
+            CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
+        }
         return 0;
     }
     return DefWindowProcA(h, m, w, l);
@@ -3535,22 +3496,63 @@ static DWORD WINAPI hotkey_thread(LPVOID p) {
  * never takes focus away from SAI.
  */
 static HWND g_launch_wnd;
+static HDC g_launch_dc;
+static HBITMAP g_launch_bmp;
+static unsigned char *g_launch_bits;
+static int g_launch_w, g_launch_h;
 static int g_launch_drag, g_launch_moved, g_launch_pinned;
+
+static void launcher_paint(void) {
+    if (!g_launch_bits) return;
+    /* round-ish padded button, drawn straight into the BGRA surface */
+    int w = g_launch_w, h = g_launch_h;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            unsigned char *px = g_launch_bits + ((size_t)y * w + x) * 4;
+            int dx = x - w / 2, dy = y - h / 2;
+            int r2 = dx * dx + dy * dy;
+            int rr = (w / 2 - 2) * (w / 2 - 2);
+            if (r2 > rr) { px[0] = px[1] = px[2] = px[3] = 0; continue; }
+            int border = (r2 > rr - 3 * (w / 2));
+            px[0] = border ? 255 : 30;
+            px[1] = border ? 255 : 130;
+            px[2] = border ? 255 : 220;
+            px[3] = 255;
+        }
+    }
+    if (g_launch_dc) {
+        SetBkMode(g_launch_dc, TRANSPARENT);
+        SetTextColor(g_launch_dc, RGB(255, 255, 255));
+        RECT rc = { 0, 0, w, h };
+        DrawTextA(g_launch_dc, "LQ", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                if (g_launch_bits[((size_t)y * w + x) * 4 + 3])
+                    g_launch_bits[((size_t)y * w + x) * 4 + 3] = 255;
+    }
+}
+
+static void launcher_update(void) {
+    if (!g_launch_wnd || !g_launch_dc) return;
+    HDC screen = GetDC(NULL);
+    POINT pt = { 0, 0 }, src = { 0, 0 };
+    SIZE sz = { g_launch_w, g_launch_h };
+    RECT r;
+    GetWindowRect(g_launch_wnd, &r);
+    pt.x = r.left; pt.y = r.top;
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER; bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = 255; bf.AlphaFormat = AC_SRC_ALPHA;
+    UpdateLayeredWindow(g_launch_wnd, screen, &pt, &sz, g_launch_dc, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(NULL, screen);
+}
 static int g_launch_dx, g_launch_dy, g_launch_sx, g_launch_sy;
 
 static LRESULT CALLBACK launcher_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC dc = BeginPaint(h, &ps);
-        RECT rc;
-        GetClientRect(h, &rc);
-        HBRUSH b = CreateSolidBrush(RGB(0, 110, 200));
-        FillRect(dc, &rc, b);
-        DeleteObject(b);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(255, 255, 255));
-        DrawTextA(dc, "LQ", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        BeginPaint(h, &ps);
         EndPaint(h, &ps);
         return 0;
     }
@@ -3576,6 +3578,7 @@ static LRESULT CALLBACK launcher_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_launch_moved = 1;
             SetWindowPos(h, HWND_TOPMOST, p.x - g_launch_dx, p.y - g_launch_dy,
                          0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            launcher_update();
         }
         return 0;
     }
@@ -3585,19 +3588,27 @@ static LRESULT CALLBACK launcher_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_launch_moved) {
             g_launch_pinned = 1;
             ms_log("LAUNCH: button moved");
-        } else if (!g_ui_hwnd) {
+        } else if (!g_ui_hwnd && !g_ui_starting) {
+            g_ui_starting = 1;
             CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
             ms_log("LAUNCH: opening liquify overlay");
         }
         return 0;
     }
     case WM_TIMER:
+        if (!IsWindowVisible(h)) ShowWindow(h, SW_SHOWNA);
         if (!g_launch_pinned && g_hwnd) {
             RECT r;
             GetWindowRect(g_hwnd, &r);
-            SetWindowPos(h, HWND_TOPMOST, r.right - 64, r.bottom - 108,
+            SetWindowPos(h, HWND_TOPMOST, r.left + 6, r.top + 6,
                          0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        } else {
+            /* other windows (a maximised SAI) can still rise above a popup:
+             * re-assert the z-order periodically */
+            SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
+        launcher_update();
         return 0;
     }
     return DefWindowProcA(h, m, w, l);
@@ -3611,11 +3622,32 @@ static DWORD WINAPI launcher_thread(LPVOID p) {
     wc.hInstance = GetModuleHandleA(NULL);
     wc.lpszClassName = "LiquifyLauncher";
     RegisterClassA(&wc);
-    g_launch_wnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+    g_launch_w = 56; g_launch_h = 56;
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = g_launch_w;
+    bi.bmiHeader.biHeight = -g_launch_h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC screen = GetDC(NULL);
+    g_launch_dc = CreateCompatibleDC(screen);
+    ReleaseDC(NULL, screen);
+    g_launch_bmp = CreateDIBSection(g_launch_dc, &bi, DIB_RGB_COLORS,
+                                    (void**)&g_launch_bits, NULL, 0);
+    if (!g_launch_bmp) { ms_log("LAUNCH: surface failed"); return 0; }
+    SelectObject(g_launch_dc, g_launch_bmp);
+    launcher_paint();
+    /* WS_EX_NOACTIVATE made the popup click-through under this Wine build, so
+     * the button never saw a tap; it takes focus on click instead. */
+    g_launch_wnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                                    "LiquifyLauncher", "LQ", WS_POPUP,
-                                   100, 100, 52, 52, NULL, NULL, wc.hInstance, NULL);
+                                   100, 100, g_launch_w, g_launch_h,
+                                   NULL, NULL, wc.hInstance, NULL);
     if (!g_launch_wnd) { ms_log("LAUNCH: create failed"); return 0; }
     ShowWindow(g_launch_wnd, SW_SHOWNOACTIVATE);
+    launcher_update();
     SetTimer(g_launch_wnd, 1, 800, NULL);
     ms_log("LAUNCH: floating button ready");
     MSG msg;
@@ -3766,11 +3798,6 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
         if (GetFileAttributesA("C:\\wt_clip") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_clip");
             clipboard_test();
-            continue;
-        }
-        if (GetFileAttributesA("C:\\wt_surfaces") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_surfaces");
-            find_surfaces();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_guard_whole") != INVALID_FILE_ATTRIBUTES) {
