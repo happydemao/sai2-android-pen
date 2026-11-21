@@ -3000,6 +3000,26 @@ static int clipboard_has_dib(void) {
     return has;
 }
 
+/* Like auto_flow, but copies the current *selection* instead of the whole
+ * canvas: SAI's Ctrl+C then yields only the selection's bounding box, and the
+ * paste lands back at the original position, so the warp stays inside the
+ * selection. */
+static void auto_flow_sel(void) {
+    if (OpenClipboard(NULL)) { EmptyClipboard(); CloseClipboard(); }
+    send_ctrl_key('C');
+    int got = 0;
+    for (int i = 0; i < 40; ++i) { Sleep(100); if (clipboard_has_dib()) { got = 1; break; } }
+    if (!got) { ms_log("AUTOSEL: SAI did not copy a selection"); return; }
+    clipboard_read();
+    if (!lq_net_ex("C:\\wt_lq.txt")) {
+        ms_log("AUTOSEL: server unavailable, warping locally");
+        lq_run();
+    }
+    Sleep(150);
+    send_ctrl_key('V');
+    ms_log("AUTOSEL: done (selection warped in place)");
+}
+
 static void auto_flow(void) {
     HWND fg = GetForegroundWindow();
     if (!fg) { ms_log("AUTO: no foreground window"); return; }
@@ -3530,14 +3550,19 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
             CreateThread(NULL, 0, ui_thread, NULL, 0, NULL);
             continue;
         }
+        if (GetFileAttributesA("C:\\wt_auto_sel") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_auto_sel");
+            auto_flow_sel();
+            continue;
+        }
         if (GetFileAttributesA("C:\\wt_auto") != INVALID_FILE_ATTRIBUTES) {
             DeleteFileA("C:\\wt_auto");
             auto_flow();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_lqnet") != INVALID_FILE_ATTRIBUTES) {
-            DeleteFileA("C:\\wt_lqnet");
             lq_net_ex("C:\\wt_lqnet");
+            DeleteFileA("C:\\wt_lqnet");
             continue;
         }
         if (GetFileAttributesA("C:\\wt_lq") != INVALID_FILE_ATTRIBUTES) {
