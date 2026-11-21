@@ -101,6 +101,8 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | 系统光标跟随笔 | ✅ 0.3.6 起，悬停/落笔都同步系统光标，见 [13](./docs/13-pen-cursor-follow.md) |
 | 触控屏手势（两指撤销/三指重做/平移/缩放/旋转/快捏适合窗口） | ✅ 0.3.8 真机实测，见 [15](./docs/15-touch-gestures.md) |
 | Winlator 主界面中文 | ✅ 0.3.8，318 条文案 + 语言列表「简体中文」，见 [16](./docs/16-winlator-chinese.md) |
+| 应用名 / 图标 | ✅ 0.3.9，`Winlator for sai` + 新图标，见 [17](./docs/17-branding.md) |
+| 虚拟鼠标按钮光标 | ✅ 0.3.9，按下时先把光标移到手指位置再点击，见 [13](./docs/13-pen-cursor-follow.md) |
 | 手指操作 UI | ⚠️ 可用，双击仍偏难 |
 | 倾斜 / 橡皮 | ⏸ 未做（evdev 有数据，协议无字段，需重编 DLL） |
 | SAI 首笔弹 `FileError(161)` | ⚠️ SAI×Wine 兼容问题，非致命，不影响作画与撤销 |
