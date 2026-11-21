@@ -24,6 +24,7 @@
 #include <stddef.h>   /* offsetof, for the wire-format assertions */
 
 #include "wintab_core.h"   /* the pure logic (parse/map/conflate) — unit-tested natively */
+#include "../engine/lq.h"  /* the liquify engine, shared with the Android side */
 
 #define SAMPLE_PORT 47800   /* UDP; the mac helper sends every pen sample here */
 
@@ -2749,15 +2750,117 @@ static void clipboard_read(void) {
     size_t imgsz = stride * (size_t)(hh < 0 ? -hh : hh);
     ms_log("CLIPREAD: %dx%d bpp=%d comp=%d imgsz=%zu hdr=%u",
            w, hh, bpp, comp, imgsz, ih->biSize);
-    if (w > 0 && bpp == 32 && comp == 0 && imgsz > 0 && imgsz <= (32u << 20)) {
-        FILE *f = fopen("C:\\wt_clipin.bin", "wb");
-        if (f) { fwrite(p + ih->biSize, 1, imgsz, f); fclose(f); }
-        FILE *g = fopen("C:\\wt_clipin.txt", "wb");
-        if (g) { fprintf(g, "%d %d %d\n", w, hh, bpp); fclose(g); }
-        ms_log("CLIPREAD: dumped %zu bytes to C:\\wt_clipin.bin", imgsz);
+    if (w > 0 && comp == 0 && imgsz > 0 && imgsz <= (48u << 20) &&
+        (bpp == 24 || bpp == 32)) {
+        /* Normalise to 32bpp BGRA, top-down, so the liquify engine has one
+         * format to care about regardless of what SAI puts on the clipboard. */
+        const unsigned char *src = p + ih->biSize;
+        int aw = w, ah = hh < 0 ? -hh : hh;
+        size_t sstride = (((size_t)w * bpp + 31) / 32) * 4;
+        size_t dstride = (size_t)aw * 4;
+        unsigned char *out = (unsigned char*)malloc(dstride * (size_t)ah);
+        if (out) {
+            for (int y = 0; y < ah; ++y) {
+                int sy = (hh > 0) ? (ah - 1 - y) : y;   /* CF_DIB is bottom-up */
+                const unsigned char *srow = src + (size_t)sy * sstride;
+                unsigned char *drow = out + (size_t)y * dstride;
+                for (int x = 0; x < aw; ++x) {
+                    if (bpp == 32) memcpy(drow + (size_t)x * 4, srow + (size_t)x * 4, 4);
+                    else {
+                        drow[x*4+0] = srow[x*3+0];
+                        drow[x*4+1] = srow[x*3+1];
+                        drow[x*4+2] = srow[x*3+2];
+                        drow[x*4+3] = 0xFF;
+                    }
+                }
+            }
+            FILE *f = fopen("C:\\wt_clipin.bin", "wb");
+            if (f) { fwrite(out, 1, dstride * (size_t)ah, f); fclose(f); }
+            FILE *g = fopen("C:\\wt_clipin.txt", "wb");
+            if (g) { fprintf(g, "%d %d 32\n", aw, ah); fclose(g); }
+            ms_log("CLIPREAD: dumped %dx%d (from bpp=%d) to C:\\wt_clipin.bin", aw, ah, bpp);
+            free(out);
+        } else {
+            ms_log("CLIPREAD: out of memory for %dx%d", aw, ah);
+        }
     }
     GlobalUnlock(h);
     CloseClipboard();
+}
+
+/* ---- liquify prototype (C:\wt_lq) ---------------------------------------
+ * Pipeline: SAI Ctrl+A/Ctrl+C -> wt_clipread (document pixels) -> warping here
+ * -> wt_paste.bin on the clipboard -> SAI Ctrl+V (new layer).
+ *
+ * This is the whole product loop minus the interactive brush; the file
+ * "C:\wt_lq.txt" holds "<mode> <x0> <y0> <x1> <y1> <radius> <strength> <steps>",
+ * all in document pixels. Applying the same spec twice must give the same
+ * pixels (the engine is idempotent per field), which is what the export test
+ * checks.
+ */
+static int lq_mode_by_name(const char *s) {
+    if (!strcmp(s, "forward")) return LQ_FORWARD;
+    if (!strcmp(s, "bloat")) return LQ_BLOAT;
+    if (!strcmp(s, "pinch")) return LQ_PINCH;
+    if (!strcmp(s, "twirl_cw")) return LQ_TWIRL_CW;
+    if (!strcmp(s, "twirl_ccw")) return LQ_TWIRL_CCW;
+    if (!strcmp(s, "smooth")) return LQ_SMOOTH;
+    return -1;
+}
+
+static void lq_run(void) {
+    int w = 0, h = 0, bpp = 0;
+    FILE *cf = fopen("C:\\wt_clipin.txt", "r");
+    if (cf) { if (fscanf(cf, "%d %d %d", &w, &h, &bpp) != 3) w = h = 0; fclose(cf); }
+    if (w <= 0 || h <= 0) { ms_log("LQ: no wt_clipin.txt"); return; }
+    size_t stride = (size_t)w * 4;
+    size_t imgsz = stride * (size_t)h;
+    unsigned char *img = (unsigned char*)malloc(imgsz);
+    FILE *pf = fopen("C:\\wt_clipin.bin", "rb");
+    if (!pf || !img) { if (pf) fclose(pf); free(img); ms_log("LQ: no input image"); return; }
+    size_t got = fread(img, 1, imgsz, pf);
+    fclose(pf);
+    if (got != imgsz) { free(img); ms_log("LQ: short read %zu/%zu", got, imgsz); return; }
+
+    char mode[32] = "forward";
+    float x0 = w * 0.4f, y0 = h * 0.5f, x1 = w * 0.6f, y1 = h * 0.5f;
+    float radius = w * 0.1f, strength = 0.6f;
+    int steps = 40;
+    cf = fopen("C:\\wt_lq.txt", "r");
+    if (cf) {
+        if (fscanf(cf, "%31s %f %f %f %f %f %f %d", mode, &x0, &y0, &x1, &y1,
+                   &radius, &strength, &steps) < 1) strcpy(mode, "forward");
+        fclose(cf);
+    }
+    int m = lq_mode_by_name(mode);
+    if (m < 0) { free(img); ms_log("LQ: unknown mode %s", mode); return; }
+    if (steps < 1) steps = 1;
+    if (steps > 2000) steps = 2000;
+
+    DWORD t0 = GetTickCount();
+    lq_ctx *c = lq_create(img, w, h, (int)stride);
+    if (!c) { free(img); ms_log("LQ: lq_create failed"); return; }
+    lq_stroke_begin(c, (int)x0, (int)y0, (int)radius);
+    for (int i = 1; i <= steps; ++i) {
+        float t = (float)i / (float)steps;
+        float px = x0 + (x1 - x0) * t, py = y0 + (y1 - y0) * t;
+        lq_apply(c, (lq_mode)m, x0 + (x1 - x0) * (t - 1.0f / steps),
+                 y0 + (y1 - y0) * (t - 1.0f / steps), px, py, radius, strength);
+    }
+    int minx = 0, miny = 0, maxx = 0, maxy = 0;
+    lq_flush(c, &minx, &miny, &maxx, &maxy);
+    DWORD t1 = GetTickCount();
+    lq_stroke_end(c);
+    lq_destroy(c);
+
+    FILE *of = fopen("C:\\wt_paste.bin", "wb");
+    if (of) { fwrite(img, 1, imgsz, of); fclose(of); }
+    FILE *tf = fopen("C:\\wt_paste.txt", "wb");
+    if (tf) { fprintf(tf, "%d %d", w, h); fclose(tf); }
+    ms_log("LQ: mode=%s %dx%d bbox=%d,%d..%d,%d %lums -> wt_paste.bin",
+           mode, w, h, minx, miny, maxx, maxy, (unsigned long)(t1 - t0));
+    free(img);
+    doc_paste();
 }
 
 static DWORD WINAPI memscan_thread(LPVOID p) {
@@ -2855,6 +2958,11 @@ static DWORD WINAPI memscan_thread(LPVOID p) {
                 }
                 free(bf);
             }
+            continue;
+        }
+        if (GetFileAttributesA("C:\\wt_lq") != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileA("C:\\wt_lq");
+            lq_run();
             continue;
         }
         if (GetFileAttributesA("C:\\wt_clipread") != INVALID_FILE_ATTRIBUTES) {

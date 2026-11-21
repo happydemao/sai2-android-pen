@@ -16,7 +16,7 @@ OUT=${1:-/private/tmp/wintab32-probe-94720.dll}
 PAD=94720
 
 "$MINGW_BIN/x86_64-w64-mingw32-gcc" -shared -O2 -o /tmp/wt-probe-raw.dll \
-    "$HERE/wintab32_probe.c" "$HERE/wintab32.def" \
+    "$HERE/wintab32_probe.c" "$HERE/../engine/lq.c" "$HERE/wintab32.def" \
     -I "$HERE" -I "$ROOT/bridge" \
     -lgdi32 -luser32 -lws2_32 -municode
 "$MINGW_BIN/llvm-strip" --strip-unneeded /tmp/wt-probe-raw.dll -o /tmp/wt-probe-stripped.dll
