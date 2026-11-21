@@ -86,6 +86,7 @@ box64.env.example   容器环境变量模板（先只加标 ★ 的 4 条，能�
 | [13-pen-cursor-follow.md](./docs/13-pen-cursor-follow.md) | 系统鼠标光标跟随内置笔的悬停/落笔 |
 | [15-touch-gestures.md](./docs/15-touch-gestures.md) | 触控屏手势：两指撤销、三指重做、平移/缩放/旋转、快捏适合窗口 |
 | [16-winlator-chinese.md](./docs/16-winlator-chinese.md) | Winlator 主界面汉化：中文资源、zh_CN 语言项、安装与切换 |
+| [17-branding.md](./docs/17-branding.md) | 应用名与启动图标：winlator for sai |
 
 ## 已验证的能力
 
