@@ -39,7 +39,7 @@ public final class PenBridge {
 
     private static final String TAG = "SaiPen";
     /* 默认关闭逐事件写文件；诊断时改 true。 */
-    private static final boolean DEBUG_LOG = true;   /* enabled for the pen-button diagnosis */
+    private static final boolean DEBUG_LOG = false;
     private static final int PORT = 47800;
     private static final int PMAX = 4095;
     /* 发送给 wintab32.dll 的坐标用 8 倍定点：协议里 x/w、y/h 只取比例，
